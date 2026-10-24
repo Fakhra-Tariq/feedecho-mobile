@@ -190,7 +190,13 @@ export function EmptyState({
       <Text style={emptyStyles.message}>{message}</Text>
       {actionLabel && onAction ? (
         <View style={emptyStyles.action}>
-          <AppButton label={actionLabel} onPress={onAction} icon="add-outline" />
+          <AppButton
+            label={actionLabel}
+            onPress={onAction}
+            icon="add-outline"
+            fullWidth={false}
+            style={emptyStyles.actionBtn}
+          />
         </View>
       ) : null}
     </View>
@@ -219,7 +225,18 @@ const emptyStyles = StyleSheet.create({
     marginTop: SPACING[2],
     maxWidth: 280,
   },
-  action: { marginTop: SPACING[5], alignSelf: 'stretch', maxWidth: 280 },
+  action: {
+    marginTop: SPACING[5],
+    alignSelf: 'center',
+    alignItems: 'center',
+  },
+  actionBtn: {
+    alignSelf: 'center',
+    minWidth: 220,
+    maxWidth: 280,
+    minHeight: 48,
+    paddingHorizontal: 28,
+  },
 });
 
 export function ScreenHeader({

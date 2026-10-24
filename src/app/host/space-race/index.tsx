@@ -11,7 +11,6 @@ import {
   Pressable,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -21,6 +20,8 @@ import { showAlert, showToast } from '@/components/feedback';
 import { ConfirmModal } from '@/components/ConfirmModal';
 import { KEYBOARD_SCROLL_PROPS, KeyboardSafeScreen } from '@/components/KeyboardSafeScreen';
 import { SpaceRaceSettingsModal } from '@/components/SpaceRaceSettingsModal';
+import { HeroHowItWorksLink, HeroStatTiles } from '@/components/HostHeroChrome';
+import { HostFilterChips, HostSearchBar } from '@/components/HostListToolbar';
 import { AppButton, EmptyState } from '@/components/ui';
 import { COLORS, FONT_WEIGHTS, RADIUS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
@@ -387,106 +388,83 @@ export default function HostSpaceRaceLibraryScreen() {
   const listPadBottom = TAB_BAR_CONTENT_HEIGHT + insets.bottom + SPACING[4];
 
   const listHeader = (
-    <View style={styles.topBlock}>
-      <View style={styles.banner} accessibilityRole="text">
-        {isSessionActive ? (
-          <>
-            <Ionicons name="checkmark-circle" size={16} color={COLORS.primary} />
-            <Text style={styles.bannerText}>
-              Launching to session:{' '}
-              <Text style={styles.bannerCode}>{activeSession?.sessionCode || '—'}</Text>
-              {' · '}
-              {activityLabel}
-            </Text>
-          </>
-        ) : (
-          <>
-            <Ionicons name="warning-outline" size={16} color={COLORS.primary} />
-            <Text style={styles.bannerText}>
-              {"You'll need an active session to launch a Space Race."}
-            </Text>
-          </>
-        )}
-      </View>
-
-      <View style={styles.hero}>
-        <View style={styles.heroBrownWash} pointerEvents="none" />
-        <View style={styles.heroTitleRow}>
-          <Text style={styles.heroTitle}>Space Race</Text>
-          <Pressable
-            onPress={() => setHowItWorksOpen(true)}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel="How it works"
-            style={styles.howLink}>
-            <Text style={styles.howLinkText}>How it works</Text>
-          </Pressable>
-        </View>
-        <Text style={styles.heroSubtitle}>Gamified quiz competitions with team leaderboards</Text>
-        <View style={styles.heroStats}>
-          {[
-            { label: 'Draft', value: stats.draft },
-            { label: 'Active', value: stats.active },
-            { label: 'Completed', value: stats.completed },
-          ].map((item) => (
-            <View key={item.label} style={styles.heroStat}>
-              <Text style={styles.heroStatLabel}>{item.label}</Text>
-              <Text style={styles.heroStatValue}>{item.value}</Text>
-            </View>
-          ))}
-        </View>
-        <View style={styles.heroActions}>
-          <Pressable
-            style={({ pressed }) => [styles.createBtn, pressed && styles.pressed]}
-            onPress={openCreate}
-            accessibilityRole="button"
-            accessibilityLabel="Create Race">
-            <Ionicons name="add" size={18} color={COLORS.primary} />
-            <Text style={styles.createBtnLabel}>Create Race</Text>
-          </Pressable>
-          {activeRace ? (
-            <Pressable
-              style={({ pressed }) => [styles.endBtn, pressed && styles.pressed]}
-              onPress={() => onEnd(String(activeRace.id || activeRace.raceId))}
-              accessibilityRole="button"
-              accessibilityLabel="End Race">
-              <Ionicons name="stop" size={16} color={COLORS.white} />
-              <Text style={styles.endBtnLabel}>End Race</Text>
-            </Pressable>
-          ) : null}
-        </View>
-      </View>
-
-      <View style={styles.filters}>
-        {FILTERS.map((item) => {
-          const on = filter === item.id;
-          return (
-            <Pressable
-              key={item.id}
-              style={({ pressed }) => [styles.chip, on && styles.chipOn, pressed && styles.pressed]}
-              onPress={() => setFilter(item.id)}
-              accessibilityRole="button"
-              accessibilityState={{ selected: on }}
-              accessibilityLabel={item.label}>
-              <Text style={[styles.chipLabel, on && styles.chipLabelOn]} numberOfLines={1}>
-                {item.label}
+    <View style={styles.listHeader}>
+      <View style={styles.topBlock}>
+        <View style={styles.banner} accessibilityRole="text">
+          {isSessionActive ? (
+            <>
+              <Ionicons name="checkmark-circle" size={16} color={COLORS.primary} />
+              <Text style={styles.bannerText}>
+                Launching to session:{' '}
+                <Text style={styles.bannerCode}>{activeSession?.sessionCode || '—'}</Text>
+                {' · '}
+                {activityLabel}
               </Text>
+            </>
+          ) : (
+            <>
+              <Ionicons name="warning-outline" size={16} color={COLORS.primary} />
+              <Text style={styles.bannerText}>
+                {"You'll need an active session to launch a Space Race."}
+              </Text>
+            </>
+          )}
+        </View>
+
+        <View style={styles.hero}>
+          <View style={styles.heroBrownWash} pointerEvents="none" />
+          <View style={styles.heroTitleRow}>
+            <Text style={styles.heroTitle} numberOfLines={1}>
+              Space Race
+            </Text>
+            <HeroHowItWorksLink onPress={() => setHowItWorksOpen(true)} />
+          </View>
+          <Text style={styles.heroSubtitle}>Gamified quiz competitions with team leaderboards</Text>
+          <HeroStatTiles
+            items={[
+              { label: 'Draft', value: stats.draft },
+              { label: 'Active', value: stats.active },
+              { label: 'Completed', value: stats.completed },
+            ]}
+          />
+          <View style={styles.heroActions}>
+            <Pressable
+              style={({ pressed }) => [styles.createBtn, pressed && styles.pressed]}
+              onPress={openCreate}
+              accessibilityRole="button"
+              accessibilityLabel="Create Race">
+              <Ionicons name="add" size={18} color={COLORS.primary} />
+              <Text style={styles.createBtnLabel}>Create Race</Text>
             </Pressable>
-          );
-        })}
+            {activeRace ? (
+              <Pressable
+                style={({ pressed }) => [styles.endBtn, pressed && styles.pressed]}
+                onPress={() => onEnd(String(activeRace.id || activeRace.raceId))}
+                accessibilityRole="button"
+                accessibilityLabel="End Race">
+                <Ionicons name="stop" size={16} color={COLORS.white} />
+                <Text style={styles.endBtnLabel}>End Race</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        </View>
       </View>
 
-      <View style={styles.searchWrap}>
-        <Ionicons name="search" size={16} color={COLORS.inkSecondary} />
-        <TextInput
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Search races..."
-          placeholderTextColor={COLORS.inkSecondary}
-          style={styles.search}
-          accessibilityLabel="Search races"
-        />
-      </View>
+      <HostFilterChips
+        items={FILTERS}
+        value={filter}
+        onChange={setFilter}
+        scrollable
+        style={styles.filters}
+      />
+
+      <HostSearchBar
+        value={search}
+        onChangeText={setSearch}
+        placeholder="Search races..."
+        accessibilityLabel="Search races"
+        style={styles.searchWrap}
+      />
     </View>
   );
 
@@ -534,7 +512,7 @@ export default function HostSpaceRaceLibraryScreen() {
             const id = String(item.id || item.raceId);
             const status = getRaceStatus(item);
             const badgeLabel =
-              status === 'active' ? 'Active' : status === 'completed' ? 'Completed' : 'Draft';
+              status === 'active' ? 'ACTIVE' : status === 'completed' ? 'COMPLETED' : 'DRAFT';
             const participants = toParticipantCount(item.participantsCount, item.participants);
             const teams = item.settings?.numberOfTeams || item.teamsCount || 2;
             const joinCode = item.joinCode || (status === 'active' ? activeSession?.sessionCode : '');
@@ -575,7 +553,7 @@ export default function HostSpaceRaceLibraryScreen() {
                 ) : (
                   <View style={styles.cardTop}>
                     <View style={styles.cardTitleRow}>
-                      <Text style={styles.cardTitle} numberOfLines={2}>
+                      <Text style={styles.cardTitle} numberOfLines={1}>
                         {item.title || 'Space Race'}
                       </Text>
                       <View
@@ -618,15 +596,34 @@ export default function HostSpaceRaceLibraryScreen() {
                   </View>
                 ) : null}
 
-                <View style={status === 'active' ? styles.activeActions : styles.actions}>
+                <View
+                  style={
+                    status === 'active'
+                      ? styles.activeActions
+                      : status === 'draft'
+                        ? styles.draftActions
+                        : styles.actions
+                  }>
                   {status === 'draft' ? (
                     <>
-                      <Action label="Edit" icon="create-outline" onPress={() => setSettingsRace(item)} />
-                      <Action label="Launch" icon="play-outline" onPress={() => onStartDraft(item)} />
+                      <View style={styles.actions}>
+                        <Action
+                          label="Edit"
+                          icon="create-outline"
+                          onPress={() => setSettingsRace(item)}
+                        />
+                        <Action
+                          label="Launch"
+                          icon="play-outline"
+                          primary
+                          onPress={() => onStartDraft(item)}
+                        />
+                      </View>
                       <Action
                         label="Delete"
                         icon="trash-outline"
                         danger
+                        fullWidth
                         onPress={() => setDeleteTarget(item)}
                       />
                     </>
@@ -751,24 +748,38 @@ function Action({
   icon,
   onPress,
   danger,
+  primary,
+  fullWidth,
 }: {
   label: string;
   icon: keyof typeof Ionicons.glyphMap;
   onPress: () => void;
   danger?: boolean;
+  primary?: boolean;
+  fullWidth?: boolean;
 }) {
+  const iconColor = primary ? COLORS.white : danger ? '#B3261E' : '#2B1F27';
   return (
     <Pressable
       style={({ pressed }) => [
         styles.action,
+        primary && styles.actionPrimary,
         danger && styles.actionDanger,
-        pressed && (danger ? styles.actionDangerPressed : styles.actionPressed),
+        fullWidth && styles.actionFullWidth,
+        pressed &&
+          (danger ? styles.actionDangerPressed : styles.actionPressed),
       ]}
       onPress={onPress}
       accessibilityRole="button"
       accessibilityLabel={label}>
-      <Ionicons name={icon} size={16} color={danger ? '#B3261E' : '#2B1F27'} />
-      <Text style={[styles.actionLabel, danger && styles.actionDangerLabel]} numberOfLines={1}>
+      <Ionicons name={icon} size={16} color={iconColor} />
+      <Text
+        style={[
+          styles.actionLabel,
+          primary && styles.actionPrimaryLabel,
+          danger && styles.actionDangerLabel,
+        ]}
+        numberOfLines={1}>
         {label}
       </Text>
     </Pressable>
@@ -783,7 +794,8 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     marginVertical: SPACING[4],
   },
-  topBlock: { gap: SPACING[3], marginBottom: SPACING[2] },
+  listHeader: { marginBottom: 4 },
+  topBlock: { gap: SPACING[3] },
   banner: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -803,7 +815,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING[3],
     paddingVertical: SPACING[3],
     overflow: 'hidden',
-    gap: 6,
   },
   heroBrownWash: {
     ...StyleSheet.absoluteFillObject,
@@ -812,26 +823,24 @@ const styles = StyleSheet.create({
   heroTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: SPACING[2],
-    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 8,
+    flexWrap: 'nowrap',
   },
   heroTitle: {
+    flex: 1,
+    minWidth: 0,
     fontSize: 22,
     fontWeight: FONT_WEIGHTS.bold,
     color: COLORS.white,
   },
-  howLink: { paddingVertical: 2 },
-  howLinkText: {
+  heroSubtitle: {
+    marginTop: 4,
     fontSize: 12,
-    color: 'rgba(255,255,255,0.92)',
-    textDecorationLine: 'underline',
+    color: 'rgba(255,255,255,0.9)',
+    lineHeight: 16,
   },
-  heroSubtitle: { fontSize: 12, color: 'rgba(255,255,255,0.9)', lineHeight: 16 },
-  heroStats: { flexDirection: 'row', marginTop: SPACING[2] },
-  heroStat: { flex: 1, alignItems: 'center', minWidth: 0 },
-  heroStatLabel: { fontSize: 10, color: 'rgba(255,255,255,0.8)' },
-  heroStatValue: { fontSize: 18, fontWeight: FONT_WEIGHTS.bold, color: COLORS.white },
-  heroActions: { flexDirection: 'row', gap: SPACING[2], marginTop: SPACING[2] },
+  heroActions: { flexDirection: 'row', gap: SPACING[2], marginTop: 12 },
   createBtn: {
     flex: 1,
     minHeight: 44,
@@ -862,34 +871,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING[2],
   },
   endBtnLabel: { color: COLORS.white, fontWeight: FONT_WEIGHTS.semibold, fontSize: 12 },
-  filters: { flexDirection: 'row', gap: 6 },
-  chip: {
-    flex: 1,
-    minWidth: 0,
-    minHeight: 36,
-    borderRadius: RADIUS.full,
-    borderWidth: 1,
-    borderColor: COLORS.divider,
-    backgroundColor: COLORS.white,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 4,
-  },
-  chipOn: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
-  chipLabel: { fontSize: 11, color: COLORS.ink, fontWeight: FONT_WEIGHTS.medium },
-  chipLabelOn: { color: COLORS.white, fontWeight: FONT_WEIGHTS.semibold },
-  searchWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: COLORS.white,
-    borderWidth: 1,
-    borderColor: COLORS.divider,
-    borderRadius: RADIUS.md,
-    minHeight: 44,
-    paddingHorizontal: SPACING[3],
-  },
-  search: { flex: 1, fontSize: 14, color: COLORS.ink, paddingVertical: Platform.OS === 'ios' ? 10 : 8 },
+  filters: { marginTop: 16, flexGrow: 0 },
+  searchWrap: { marginTop: 12 },
   card: {
     backgroundColor: COLORS.white,
     borderRadius: RADIUS.md,
@@ -931,20 +914,38 @@ const styles = StyleSheet.create({
     flexShrink: 0,
     gap: 4,
   },
-  cardTitleRow: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-  cardTitle: { fontSize: 16, fontWeight: FONT_WEIGHTS.semibold, color: COLORS.ink, flexShrink: 1 },
+  cardTitleRow: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'nowrap',
+  },
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: FONT_WEIGHTS.semibold,
+    color: COLORS.ink,
+    flexShrink: 1,
+    minWidth: 0,
+  },
   badge: {
-    borderRadius: RADIUS.full,
+    borderRadius: 8,
     paddingHorizontal: 8,
     paddingVertical: 3,
-    backgroundColor: COLORS.mutedSoft,
+    backgroundColor: '#F1EDF0',
     flexShrink: 0,
   },
-  badgeActive: { backgroundColor: 'rgba(109,65,95,0.2)' },
-  badgeCompleted: { backgroundColor: 'rgba(109,65,95,0.1)' },
-  badgeLabel: { fontSize: 11, fontWeight: FONT_WEIGHTS.medium, color: COLORS.mutedText },
-  badgeLabelActive: { color: COLORS.primary },
-  badgeLabelCompleted: { color: COLORS.primary },
+  badgeActive: { backgroundColor: '#DCFCE7' },
+  badgeCompleted: { backgroundColor: '#F1EDF0' },
+  badgeLabel: {
+    fontSize: 11,
+    fontWeight: FONT_WEIGHTS.semibold,
+    textTransform: 'uppercase',
+    color: '#5F5460',
+  },
+  badgeLabelActive: { color: '#15803D' },
+  badgeLabelCompleted: { color: '#5F5460' },
   activeActions: {
     flexDirection: 'column',
     alignItems: 'stretch',
@@ -985,6 +986,12 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   boardRow: { fontSize: 12, color: COLORS.ink },
+  draftActions: {
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    gap: 10,
+    width: '100%',
+  },
   actions: {
     flexDirection: 'row',
     flexWrap: 'nowrap',
@@ -1011,6 +1018,16 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: FONT_WEIGHTS.medium,
     color: '#2B1F27',
+  },
+  actionPrimary: {
+    backgroundColor: '#6B3A5C',
+    borderColor: '#6B3A5C',
+  },
+  actionPrimaryLabel: { color: COLORS.white },
+  actionFullWidth: {
+    flex: 0,
+    width: '100%',
+    alignSelf: 'stretch',
   },
   actionDanger: {
     borderColor: '#F5B5B0',

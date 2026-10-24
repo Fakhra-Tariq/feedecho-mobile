@@ -15,10 +15,6 @@
       "backgroundColor": "#F4F0EA",
       "barStyle": "dark-content"
     },
-    "androidNavigationBar": {
-      "backgroundColor": "#F4F0EA",
-      "barStyle": "dark-content"
-    },
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#F4F1EC",
@@ -50,7 +46,11 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
-      ]
+      ],
+      "expo-font",
+      "expo-image",
+      "expo-status-bar",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,

@@ -17,8 +17,6 @@ import {
   useState,
   type PropsWithChildren,
 } from 'react';
-import type * as Google from 'expo-auth-session/providers/google';
-
 import { auth, db } from '../../firebaseConfig';
 import {
   canAccessStudentPortal,
@@ -26,7 +24,6 @@ import {
   syncProfileFromBackend,
 } from '@/lib/ensureProfile';
 import { ApiError } from '@/lib/api';
-import { signInWithGoogleNative } from '@/lib/googleAuth';
 import { persistJoinedQuizSession } from '@/lib/audienceQuizSession';
 import { joinSessionUnified } from '@/lib/hostSpaceRaces';
 import {
@@ -46,7 +43,13 @@ const STUDENT_NAME_KEY = 'studentName';
 const JOIN_ACTIVITY_KEY = 'joinActivityType';
 
 type Portal = 'teacher' | 'student';
-type GooglePrompt = ReturnType<typeof Google.useAuthRequest>[2];
+type GooglePrompt = (options?: Record<string, unknown>) => Promise<{
+  type: string;
+  params?: { id_token?: string };
+  authentication?: { idToken?: string };
+}>;
+const GOOGLE_UNAVAILABLE_MESSAGE =
+  "Google sign-in isn't available right now. Use email and password instead.";
 
 export type AppProfile = {
   uid: string;
@@ -203,6 +206,14 @@ function mapJoinActivityType(
 
 function authErrorMessage(error: unknown, fallback = 'Login failed') {
   const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
+  const rawMessage = error instanceof Error ? error.message : '';
+  if (
+    code === 'auth/google-unavailable' ||
+    /Cannot find native module|ExpoCrypto|expo-auth-session/i.test(rawMessage)
+  ) {
+    console.log('[Google Auth]', error);
+    return GOOGLE_UNAVAILABLE_MESSAGE;
+  }
   switch (code) {
     case 'auth/user-not-found':
       return 'No account found with this email';
@@ -337,6 +348,13 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const signInHostWithGoogle = async (promptAsync: GooglePrompt): Promise<AuthResult> => {
     try {
+      let signInWithGoogleNative: typeof import('@/lib/googleAuth').signInWithGoogleNative;
+      try {
+        signInWithGoogleNative = require('@/lib/googleAuth').signInWithGoogleNative;
+      } catch (loadError) {
+        console.log('[Google Auth] failed to load googleAuth', loadError);
+        return { success: false, error: GOOGLE_UNAVAILABLE_MESSAGE };
+      }
       const result = await signInWithGoogleNative(promptAsync);
       const backend = await syncProfileFromBackend(result.user, 'teacher', undefined, undefined, {
         mergeRole: true,
@@ -429,6 +447,13 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const audienceSignInWithGoogle = async (promptAsync: GooglePrompt): Promise<AuthResult> => {
     try {
+      let signInWithGoogleNative: typeof import('@/lib/googleAuth').signInWithGoogleNative;
+      try {
+        signInWithGoogleNative = require('@/lib/googleAuth').signInWithGoogleNative;
+      } catch (loadError) {
+        console.log('[Google Auth] failed to load googleAuth', loadError);
+        return { success: false, error: GOOGLE_UNAVAILABLE_MESSAGE };
+      }
       const result = await signInWithGoogleNative(promptAsync);
       const backend = await syncProfileFromBackend(result.user, 'student', undefined, undefined, {
         mergeRole: true,

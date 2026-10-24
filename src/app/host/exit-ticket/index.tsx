@@ -10,7 +10,6 @@ import {
   Pressable,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -19,6 +18,8 @@ import { ActivityCreatedModal } from '@/components/ActivityCreatedModal';
 import { KEYBOARD_SCROLL_PROPS, KeyboardSafeScreen } from '@/components/KeyboardSafeScreen';
 import { ConfirmModal } from '@/components/ConfirmModal';
 import { showAlert, showToast } from '@/components/feedback';
+import { HeroHowItWorksLink, HeroStatTiles } from '@/components/HostHeroChrome';
+import { HostFilterChips, HostSearchBar } from '@/components/HostListToolbar';
 import { EmptyState } from '@/components/ui';
 import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
@@ -326,33 +327,19 @@ export default function ExitTicketLibraryScreen() {
       <View style={styles.hero}>
         <View style={styles.heroTitleRow}>
           <Text style={styles.heroTitle}>Exit Ticket</Text>
-          <Pressable
-            onPress={() => setShowHowItWorks(true)}
-            style={({ pressed }) => [styles.howItWorks, pressed && styles.pressed]}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel="How it works">
-            <Ionicons name="help-circle-outline" size={14} color="#EADBE5" />
-            <Text style={styles.howItWorksText}>How it works</Text>
-            <Ionicons name="chevron-forward" size={12} color="#EADBE5" />
-          </Pressable>
+          <HeroHowItWorksLink onPress={() => setShowHowItWorks(true)} />
         </View>
         <Text style={styles.heroSubtitle}>
           Collect anonymous audience feedback and track attendance
         </Text>
 
-        <View style={styles.stats}>
-          {[
-            ['Drafts', stats.drafts],
-            ['Active', stats.active],
-            ['Ended', stats.ended],
-          ].map(([label, value]) => (
-            <View key={String(label)} style={styles.stat}>
-              <Text style={styles.statValue}>{value}</Text>
-              <Text style={styles.statLabel}>{label}</Text>
-            </View>
-          ))}
-        </View>
+        <HeroStatTiles
+          items={[
+            { label: 'Drafts', value: stats.drafts },
+            { label: 'Active', value: stats.active },
+            { label: 'Ended', value: stats.ended },
+          ]}
+        />
 
         <View style={styles.heroActions}>
           <Pressable
@@ -389,34 +376,21 @@ export default function ExitTicketLibraryScreen() {
         </View>
       </View>
 
-      <View style={styles.filters}>
-        {FILTERS.map((item) => {
-          const on = filter === item.id;
-          return (
-            <Pressable
-              key={item.id}
-              style={[styles.chip, on && styles.chipOn]}
-              onPress={() => setFilter(item.id)}
-              accessibilityRole="button"
-              accessibilityState={{ selected: on }}
-              accessibilityLabel={`Filter: ${item.label}`}>
-              <Text style={[styles.chipLabel, on && styles.chipLabelOn]}>{item.label}</Text>
-            </Pressable>
-          );
-        })}
-      </View>
+      <HostFilterChips
+        items={FILTERS}
+        value={filter}
+        onChange={setFilter}
+        accessibilityLabelFor={(item) => `Filter: ${item.label}`}
+        style={styles.filters}
+      />
 
-      <View style={styles.searchWrap}>
-        <Ionicons name="search-outline" size={18} color="#8A7F89" />
-        <TextInput
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Search exit tickets..."
-          placeholderTextColor="#8A7F89"
-          style={styles.search}
-          accessibilityLabel="Search exit tickets"
-        />
-      </View>
+      <HostSearchBar
+        value={search}
+        onChangeText={setSearch}
+        placeholder="Search exit tickets..."
+        accessibilityLabel="Search exit tickets"
+        style={styles.searchWrap}
+      />
 
       {loading ? (
         <View style={styles.centered}>
@@ -720,45 +694,11 @@ const styles = StyleSheet.create({
     fontWeight: FONT_WEIGHTS.bold,
     color: COLORS.white,
   },
-  howItWorks: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    minHeight: 44,
-  },
-  howItWorksText: {
-    fontSize: 12,
-    color: '#EADBE5',
-  },
   heroSubtitle: {
     marginTop: 4,
     fontSize: 12,
     color: '#EADBE5',
     lineHeight: 16,
-  },
-  stats: {
-    marginTop: 10,
-    flexDirection: 'row',
-    gap: 8,
-  },
-  stat: {
-    flex: 1,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    borderRadius: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  statValue: {
-    color: COLORS.white,
-    fontWeight: FONT_WEIGHTS.bold,
-    fontSize: 18,
-  },
-  statLabel: {
-    color: '#EADBE5',
-    fontSize: 11,
-    marginTop: 2,
   },
   heroActions: {
     flexDirection: 'row',
@@ -805,48 +745,10 @@ const styles = StyleSheet.create({
   filters: {
     marginHorizontal: 16,
     marginTop: 16,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
   },
-  chip: {
-    height: 40,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#E3D9E0',
-    paddingHorizontal: 14,
-    backgroundColor: COLORS.white,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  chipOn: {
-    backgroundColor: '#6B3A5C',
-    borderColor: '#6B3A5C',
-  },
-  chipLabel: {
-    fontSize: 13,
-    fontWeight: FONT_WEIGHTS.medium,
-    color: '#2B1F27',
-  },
-  chipLabelOn: { color: COLORS.white },
   searchWrap: {
     marginHorizontal: 16,
     marginTop: 12,
-    height: 44,
-    borderRadius: 24,
-    borderWidth: 1,
-    borderColor: '#E8DFE6',
-    backgroundColor: COLORS.white,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 14,
-    gap: 8,
-  },
-  search: {
-    flex: 1,
-    fontSize: 13,
-    color: COLORS.text,
-    paddingVertical: 0,
   },
   list: {
     paddingTop: 16,
