@@ -41,3 +41,25 @@ example
 # generated native folders
 /ios
 /android
+
+# Expo / build output (additional)
+.expo-shared/
+build/
+*.apk
+*.aab
+*.ipa
+
+# Secrets
+.env
+.env.*
+!.env.example
+google-services.json
+GoogleService-Info.plist
+*.keystore
+serviceAccountKey*.json
+
+# Logs / OS / editor
+*.log
+Thumbs.db
+.vscode/
+.idea/
