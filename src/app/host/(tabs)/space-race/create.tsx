@@ -76,7 +76,7 @@ export default function CreateSpaceRaceScreen() {
     joinDuration: 30,
     shuffleQuestions: false,
     shuffleAnswers: false,
-    showQuestionFeedback: true,
+    showQuestionFeedback: false,
     showFinalScore: true,
     studentsPerTeam: 3,
   });

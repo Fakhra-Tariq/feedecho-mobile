@@ -3,6 +3,7 @@ import { useMemo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { COLORS, FONT_WEIGHTS, SPACING } from '@/constants/theme';
+import { spaceRaceTeamPercentFromSelections } from '@/lib/spaceRaceResultStats';
 import { teamScoreFromNode } from '@/lib/spaceRaceTeams';
 import { useRtdbList, useRtdbValue } from '@/lib/useRtdb';
 
@@ -58,15 +59,29 @@ export function SpaceRaceAudienceScoreBoard({
     raceId ? `space_race_team_scores/${raceId}` : null,
     { enabled: Boolean(raceId) }
   );
+  const { value: teamSelectionsRaw } = useRtdbValue(
+    raceId ? `space_race_team_selection/${raceId}` : null,
+    { enabled: Boolean(raceId) }
+  );
 
   const numberOfTeams = race?.settings?.numberOfTeams || race?.teams || 2;
   const iconName = raceIonicon(race?.settings?.icon);
+  const totalQuestions =
+    race?.quiz?.questions?.length ||
+    race?.quizQuestions?.length ||
+    Number(race?.questionsCount) ||
+    0;
 
   const rows = useMemo(() => {
     const teams = Math.max(2, Math.min(10, Number(numberOfTeams) || 2));
     const out = [];
     for (let teamId = 1; teamId <= teams; teamId += 1) {
       const fromScores = teamScoreFromNode(teamScoresRaw?.[`team_${teamId}`]);
+      const selectionNode =
+        teamSelectionsRaw?.[`team_${teamId}`] ??
+        teamSelectionsRaw?.[teamId] ??
+        teamSelectionsRaw?.[String(teamId)];
+      const fromSelection = spaceRaceTeamPercentFromSelections(selectionNode, totalQuestions).score;
       const members = participants.filter((p) => Number(p.teamId) === teamId);
       const fromMembers = members.reduce(
         (max, p) => Math.max(max, typeof p.score === 'number' ? p.score : 0),
@@ -74,12 +89,12 @@ export function SpaceRaceAudienceScoreBoard({
       );
       out.push({
         teamId,
-        score: Math.round(Math.max(fromScores, fromMembers)),
+        score: Math.round(Math.max(fromScores, fromSelection, fromMembers)),
         members: members.length,
       });
     }
     return out;
-  }, [numberOfTeams, participants, teamScoresRaw]);
+  }, [numberOfTeams, participants, teamScoresRaw, teamSelectionsRaw, totalQuestions]);
 
   const maxScore = Math.max(1, ...rows.map((r) => r.score));
 

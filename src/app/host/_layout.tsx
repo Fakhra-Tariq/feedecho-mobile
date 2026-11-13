@@ -1,31 +1,29 @@
-import { Redirect, Tabs, usePathname, type Href } from 'expo-router';
+import { Redirect, Stack, usePathname, type Href } from 'expo-router';
 import { useEffect } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Platform, StatusBar, StyleSheet, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { HostHeaderLogo } from '@/components/HostHeaderLogo';
 import { HostProfileButton } from '@/components/HostProfileButton';
-import { TAB_BAR_INACTIVE_COLOR, TabBarGlyph, TabBarLabel } from '@/components/TabBarGlyph';
 import { COLORS, FONT_WEIGHTS } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { HostSessionProvider } from '@/context/HostSessionContext';
 import { setHostPathname } from '@/lib/activeActivity';
-import { useSafeTabBarStyle } from '@/lib/tabBarSafeArea';
 
 /**
- * Host tabs match Web HostLayout order:
- * Explore → Sessions → Quiz → Library → Space Race → Exit Ticket → Reports
- * Profile is reached from the header avatar/name (same as Web navbar).
+ * Host shell: tab navigator in `(tabs)`, Live Chat as a stack screen so
+ * Explore can `router.push('/host/live-chat')`. Expo Router SDK 58
+ * `href: null` on a tab unregisters the route (`hidden: true`), which made
+ * that push a no-op.
  */
 export default function HostLayout() {
   const { loading, isHost } = useAuth();
   const pathname = usePathname();
+  const insets = useSafeAreaInsets();
+  const androidHeaderStatusBarHeight =
+    Platform.OS === 'android' ? Math.max(insets.top, StatusBar.currentHeight ?? 0) : undefined;
   useEffect(() => {
     setHostPathname(pathname);
   }, [pathname]);
-  const tabBarStyle = useSafeTabBarStyle({
-    borderTopWidth: 1,
-    borderTopColor: COLORS.cardBorder,
-  });
 
   if (loading) {
     return (
@@ -41,127 +39,31 @@ export default function HostLayout() {
 
   return (
     <HostSessionProvider>
-      <Tabs
+      <Stack
         screenOptions={{
           headerStyle: { backgroundColor: COLORS.white },
           headerTintColor: COLORS.header,
           headerTitleStyle: { fontWeight: FONT_WEIGHTS.semibold, color: COLORS.ink },
           headerShadowVisible: false,
-          headerRight: () => <HostProfileButton />,
-          headerTitleContainerStyle: { maxWidth: '70%' },
-          tabBarActiveTintColor: COLORS.plumInk,
-          tabBarInactiveTintColor: TAB_BAR_INACTIVE_COLOR,
-          tabBarStyle,
-          tabBarItemStyle: { minHeight: 44 },
-          tabBarHideOnKeyboard: true,
-          sceneStyle: { backgroundColor: COLORS.background },
+          contentStyle: { backgroundColor: COLORS.background },
         }}>
-        <Tabs.Screen
-          name="index"
-          options={{
-            title: 'Explore',
-            tabBarLabel: ({ focused }) => <TabBarLabel focused={focused}>Explore</TabBarLabel>,
-            tabBarAccessibilityLabel: 'Explore',
-            tabBarIcon: ({ focused }) => (
-              <TabBarGlyph focused={focused} outline="compass-outline" filled="compass" />
-            ),
-          }}
-        />
-        <Tabs.Screen
-          name="sessions"
-          options={{
-            title: 'Sessions',
-            tabBarLabel: ({ focused }) => <TabBarLabel focused={focused}>Sessions</TabBarLabel>,
-            tabBarAccessibilityLabel: 'Sessions',
-            tabBarIcon: ({ focused }) => (
-              <TabBarGlyph focused={focused} outline="calendar-outline" filled="calendar" />
-            ),
-          }}
-        />
-        <Tabs.Screen
-          name="quiz"
-          options={{
-            title: 'Quiz',
-            tabBarLabel: ({ focused }) => <TabBarLabel focused={focused}>Quiz</TabBarLabel>,
-            tabBarAccessibilityLabel: 'Quiz',
-            headerShown: false,
-            tabBarIcon: ({ focused }) => (
-              <TabBarGlyph focused={focused} outline="help-circle-outline" filled="help-circle" />
-            ),
-          }}
-        />
-        <Tabs.Screen
-          name="library"
-          options={{
-            title: 'Library',
-            headerTitleAlign: 'left',
-            headerTitle: () => <HostHeaderLogo />,
-            tabBarLabel: ({ focused }) => <TabBarLabel focused={focused}>Library</TabBarLabel>,
-            tabBarAccessibilityLabel: 'Library',
-            tabBarIcon: ({ focused }) => (
-              <TabBarGlyph focused={focused} outline="library-outline" filled="library" />
-            ),
-          }}
-        />
-        <Tabs.Screen
-          name="space-race"
-          options={{
-            title: 'Space Race',
-            tabBarLabel: ({ focused }) => <TabBarLabel focused={focused}>Race</TabBarLabel>,
-            tabBarAccessibilityLabel: 'Race',
-            headerShown: false,
-            tabBarIcon: ({ focused }) => (
-              <TabBarGlyph focused={focused} outline="rocket-outline" filled="rocket" />
-            ),
-          }}
-        />
-        <Tabs.Screen
-          name="exit-ticket"
-          options={{
-            title: 'Exit Ticket',
-            tabBarLabel: ({ focused }) => <TabBarLabel focused={focused}>Ticket</TabBarLabel>,
-            tabBarAccessibilityLabel: 'Ticket',
-            headerShown: false,
-            tabBarIcon: ({ focused }) => (
-              <TabBarGlyph
-                focused={focused}
-                outline="document-text-outline"
-                filled="document-text"
-              />
-            ),
-          }}
-        />
-        <Tabs.Screen
-          name="reports"
-          options={{
-            title: 'Reports',
-            tabBarLabel: ({ focused }) => <TabBarLabel focused={focused}>Reports</TabBarLabel>,
-            tabBarAccessibilityLabel: 'Reports',
-            tabBarIcon: ({ focused }) => (
-              <TabBarGlyph focused={focused} outline="stats-chart-outline" filled="stats-chart" />
-            ),
-          }}
-        />
-        <Tabs.Screen
-          name="profile"
-          options={{
-            href: null,
-            title: 'Host profile',
-          }}
-        />
-        <Tabs.Screen
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen
           name="live-chat"
           options={{
-            href: null,
             title: 'Anonymous Chat',
+            headerRight: () => <HostProfileButton />,
             headerTitleStyle: {
               fontSize: 20,
               fontWeight: FONT_WEIGHTS.medium,
               color: COLORS.ink,
             },
+            ...(androidHeaderStatusBarHeight != null
+              ? { headerStatusBarHeight: androidHeaderStatusBarHeight }
+              : {}),
           }}
         />
-      </Tabs>
+      </Stack>
     </HostSessionProvider>
   );
 }

@@ -14,6 +14,7 @@ export type ActivityItem = {
   quizId?: string;
   raceId?: string;
   ticketId?: string;
+  chatId?: string;
   rank?: string;
   subtitle?: string;
   date?: string;
@@ -115,6 +116,7 @@ export async function getStudentActivity(params: StudentQueryIdentity & {
     username: params.username,
     aliases: params.aliases,
     limit: params.limit ?? 200,
+    details: params.details,
   });
   const response = await apiRequest<{ success?: boolean; data?: ActivityItem[]; error?: string }>(
     `/students/activity${qs}`,
@@ -169,6 +171,12 @@ export async function localQuizActivityItems(identity: StudentQueryIdentity): Pr
         date: when.date,
         time: when.time,
         source: 'local',
+        questions: row.questions,
+        answers: row.answers,
+        timeTaken: row.timeTaken,
+        correctAnswers: row.correctAnswers ?? row.score,
+        totalQuestions: row.totalQuestions,
+        quizType: row.quizType,
       } as ActivityItem;
     });
 }
@@ -196,12 +204,37 @@ export async function localQuizHistoryRows(identity: StudentQueryIdentity): Prom
     });
 }
 
+function questionList(questions: unknown) {
+  if (Array.isArray(questions)) return questions.filter(Boolean);
+  if (questions && typeof questions === 'object') {
+    return Object.values(questions as Record<string, unknown>).filter(Boolean);
+  }
+  return [];
+}
+
+function hasAnswers(answers: unknown) {
+  if (!answers) return false;
+  if (Array.isArray(answers)) return answers.length > 0;
+  if (typeof answers === 'object') return Object.keys(answers as object).length > 0;
+  return false;
+}
+
 export function mergeActivityItems(server: ActivityItem[], local: ActivityItem[]) {
   const map = new Map<string, ActivityItem>();
   [...local, ...server].forEach((item) => {
     const key = activityDedupeKey(item);
     const existing = map.get(key);
-    map.set(key, existing ? { ...existing, ...item, id: key } : { ...item, id: key });
+    const merged = existing ? { ...existing, ...item, id: key } : { ...item, id: key };
+    if (!questionList(merged.questions).length && existing) {
+      merged.questions = existing.questions;
+    }
+    if (!hasAnswers(merged.answers) && existing?.answers) {
+      merged.answers = existing.answers;
+    }
+    if (merged.timeTaken == null && existing?.timeTaken != null) {
+      merged.timeTaken = existing.timeTaken;
+    }
+    map.set(key, merged);
   });
   return Array.from(map.values()).sort((a, b) =>
     String(b.sortKey || b.submittedAt || b.joinedAt || '').localeCompare(
@@ -235,20 +268,31 @@ export function activityDedupeKey(item: ActivityItem) {
     return `spaceRace:${item.raceId}:${item.joinedAt || ''}`;
   if (item.type === 'exitTicket' && item.ticketId)
     return `exitTicket:${item.ticketId}:${item.submittedAt || ''}`;
+  if ((item.type === 'liveChat' || item.type === 'anonymousChat') && (item.chatId || item.id)) {
+    return String(item.id || `liveChat-${item.chatId}`);
+  }
   return `${item.type || 'item'}:${item.title || ''}:${item.timestamp || ''}`;
 }
 
 export function activityLine(item: ActivityItem) {
-  if (item.type === 'quiz' && item.score != null && item.score !== '') {
-    return `Score: ${item.score}`;
+  if (item.type === 'quiz') {
+    const raw = item.percentage ?? item.score;
+    if (raw == null || raw === '') return '';
+    const n = String(raw).replace(/%/g, '').trim();
+    if (!n || n === 'undefined' || n === 'null') return '';
+    return `Score: ${n}%`;
   }
   if (item.type === 'spaceRace' && item.rank) {
-    return `Rank: ${item.rank}`;
+    const rank = String(item.rank).trim();
+    if (!rank || rank === 'undefined' || rank === 'Team —') return '';
+    return `Rank: ${rank}`;
   }
   if (item.type === 'exitTicket') {
     return 'Submitted exit ticket';
   }
-  return String(item.subtitle || '');
+  const subtitle = String(item.subtitle || '').trim();
+  if (!subtitle || subtitle === 'undefined' || subtitle === 'null') return '';
+  return subtitle;
 }
 
 export function activityWhen(item: ActivityItem) {
@@ -263,4 +307,52 @@ export function activityBadge(item: ActivityItem) {
   if (item.type === 'exitTicket') return 'Exit Ticket';
   if (item.type === 'spaceRace') return 'Space Race';
   return String(item.type || 'Activity');
+}
+
+function visibleText(value: unknown) {
+  const text = String(value ?? '').trim();
+  if (!text || text === 'undefined' || text === 'null' || text === '—') return '';
+  return text;
+}
+
+/** Home Recent Activity title — same fields as Web AudienceHome. */
+export function activityHomeTitle(
+  item: ActivityItem,
+  ticketTitles: Record<string, string> = {}
+) {
+  if (item.type === 'exitTicket') {
+    const own = visibleText(item.title);
+    if (own && own !== 'Exit Ticket') return own;
+    const ticketId = String(item.ticketId || '').trim();
+    const fetched = ticketId ? visibleText(ticketTitles[ticketId]) : '';
+    return fetched || 'Exit Ticket';
+  }
+  if (item.type === 'liveChat' || item.type === 'anonymousChat') {
+    return visibleText(item.title) || 'Live Chat';
+  }
+  return visibleText(item.title);
+}
+
+/** Home subtitle: "60% score" / "Submitted exit ticket" / "Team 1". Omit empty or Team —. */
+export function activityHomeSubtitle(item: ActivityItem) {
+  const subtitle = visibleText(item.subtitle);
+  if (subtitle && subtitle !== 'Team —') return subtitle;
+  if (item.type === 'quiz') {
+    const pct = item.percentage ?? item.score;
+    if (pct == null || pct === '') return '';
+    const n = String(pct).replace(/%/g, '').trim();
+    if (!n || n === 'undefined') return '';
+    return `${n}% score`;
+  }
+  if (item.type === 'exitTicket') return 'Submitted exit ticket';
+  if (item.type === 'liveChat' || item.type === 'anonymousChat') return 'Joined live chat';
+  if (item.type === 'spaceRace') {
+    const team = item.teamId ?? (typeof item.rank === 'string' && item.rank.startsWith('Team ')
+      ? String(item.rank).replace(/^Team\s+/i, '')
+      : '');
+    const teamText = visibleText(team);
+    if (!teamText) return '';
+    return `Team ${teamText}`;
+  }
+  return '';
 }

@@ -5,9 +5,11 @@ import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { COLORS } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { shouldStayOnPublicHome } from '@/lib/activityEntrySource';
+import { isCodeJoinGuest } from '@/lib/guestSession';
 import {
   clearLastAppliedJoinHref,
   getLastAppliedJoinHref,
+  hrefToRouterTarget,
   resolvePendingJoinHref,
 } from '@/lib/joinSessionNavigation';
 
@@ -37,7 +39,12 @@ type JoinGate = 'idle' | 'checking' | { activity: string } | 'audience';
  * (and honor lastAppliedJoinHref if navigate already ran), then redirect.
  */
 export function useEntryRedirect(screen: EntryScreen) {
-  const { loading, isHost, isStudent } = useAuth();
+  const { loading, isHost, isStudent, profile, user, portal } = useAuth();
+  const isGuest = isCodeJoinGuest({
+    profileGuest: profile?.guest,
+    isHost,
+    firebaseUid: user?.uid,
+  });
   const [joinGate, setJoinGate] = useState<JoinGate>('idle');
 
   useEffect(() => {
@@ -62,7 +69,7 @@ export function useEntryRedirect(screen: EntryScreen) {
         (await resolvePendingJoinHref()) || getLastAppliedJoinHref();
       if (cancelled) return;
       if (href) {
-        clearLastAppliedJoinHref();
+        // Keep lastAppliedJoinHref so a failed nested replace can still recover.
         setJoinGate({ activity: href });
       } else {
         setJoinGate('audience');
@@ -72,27 +79,53 @@ export function useEntryRedirect(screen: EntryScreen) {
     return () => {
       cancelled = true;
     };
-  }, [screen, isStudent]);
+  }, [screen, isStudent, isGuest, loading]);
 
   if (loading) return 'loading' as const;
-  if (isHost) return '/host' as Href;
+  // Public /join is a participant entry (Web guest join). Never send a logged-in
+  // host to the host dashboard from this screen — a code join always opens the activity.
+  if (isHost && screen !== 'join') {
+    console.log('[TEMP DEBUG] EntryGate redirect', { screen, from: screen, to: '/host', user: user?.uid || null, role: profile?.role, portal, loading, isGuest });
+    return '/host' as Href;
+  }
 
   // Logged-in student on host-login → audience dashboard (unchanged).
-  if (screen === 'host-login' && isStudent) return '/audience' as Href;
-
-  // Fresh student opening the landing page → audience.
-  // After leaving a public-join activity, stay on landing even if still logged in.
-  if (screen === 'landing' && isStudent) {
-    if (shouldStayOnPublicHome()) return null;
+  if (screen === 'host-login' && isStudent && !isGuest) {
+    console.log('[TEMP DEBUG] EntryGate redirect', { screen, from: 'host-login', to: '/audience', user: user?.uid || null, role: profile?.role, portal, loading, isGuest });
     return '/audience' as Href;
   }
 
-  // Guest join screen after isStudent flips: wait, then activity or /audience.
+  // Fresh logged-in student opening the landing page → audience.
+  // Guests (code join, no login) must never be sent to Home/Progress/Study/Profile.
+  if (screen === 'landing' && isStudent) {
+    if (shouldStayOnPublicHome() || isGuest) return null;
+    console.log('[TEMP DEBUG] EntryGate redirect', { screen, from: 'landing', to: '/audience', user: user?.uid || null, role: profile?.role, portal, loading, isGuest });
+    return '/audience' as Href;
+  }
+
+  // After isStudent flips on /join: wait, then activity. Never /audience for guests.
   if (screen === 'join' && isStudent) {
     if (joinGate === 'idle' || joinGate === 'checking') return 'loading' as const;
     if (typeof joinGate === 'object' && joinGate.activity) {
-      return joinGate.activity as Href;
+      console.log('[TEMP DEBUG] EntryGate redirect', {
+        screen,
+        from: '/join',
+        to: joinGate.activity,
+        user: user?.uid || null,
+        role: profile?.role,
+        portal,
+        loading,
+        isGuest,
+      });
+      return hrefToRouterTarget(joinGate.activity);
     }
+    // Guests are not logged-in students. A code join must open the activity,
+    // never Home/Progress/Study/Profile. Do not send guests to /audience.
+    if (isGuest) {
+      console.log('[TEMP DEBUG] EntryGate skip dashboard for guest', { user: user?.uid || null, role: profile?.role, portal, loading, isGuest });
+      return null;
+    }
+    console.log('[TEMP DEBUG] EntryGate redirect', { screen, from: '/join', to: '/audience', user: user?.uid || null, role: profile?.role, portal, loading, isGuest });
     return '/audience' as Href;
   }
 

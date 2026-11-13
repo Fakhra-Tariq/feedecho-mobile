@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { KeyboardSafeScreen } from '@/components/KeyboardSafeScreen';
+import { KeyboardModalFrame } from '@/components/KeyboardSafeScreen';
 import { AppButton } from '@/components/ui';
 import { COLORS, RADIUS, SHADOWS, SPACING, TYPE } from '@/constants/theme';
 
@@ -26,22 +26,38 @@ export function CreateSessionModal({
 }: Props) {
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
-      <KeyboardSafeScreen scroll={false} variant="modal" style={styles.overlay}>
-        <Pressable style={styles.overlayInner} onPress={onCancel}>
-        <Pressable style={styles.card} onPress={(e) => e.stopPropagation()}>
+      <KeyboardModalFrame style={styles.overlay} onBackdropPress={onCancel}>
+        <Pressable
+          style={styles.card}
+          onPress={(e) => e.stopPropagation()}
+          onLayout={(e) => {
+            // TEMP DEBUG — remove after Create Session modal sits above Gboard
+            console.log('[TEMP DEBUG] CreateSessionModal card onLayout', {
+              height: Math.round(e.nativeEvent.layout.height),
+              width: Math.round(e.nativeEvent.layout.width),
+              y: Math.round(e.nativeEvent.layout.y),
+            });
+          }}>
           <View style={styles.iconWrap}>
             <Ionicons name="calendar-outline" size={26} color={COLORS.primary} />
           </View>
           <Text style={styles.title}>{title}</Text>
-          <Text style={styles.label}>Session Name</Text>
-          <TextInput
-            value={value}
-            onChangeText={onChangeText}
-            placeholder="Enter session name"
-            placeholderTextColor={COLORS.darkTextSecondary}
-            style={styles.input}
-            autoFocus
-          />
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            bounces={false}
+            style={styles.fields}
+            contentContainerStyle={styles.fieldsContent}>
+            <Text style={styles.label}>Session Name</Text>
+            <TextInput
+              value={value}
+              onChangeText={onChangeText}
+              placeholder="Enter session name"
+              placeholderTextColor={COLORS.darkTextSecondary}
+              style={styles.input}
+              autoFocus
+            />
+          </ScrollView>
           <View style={styles.row}>
             <AppButton
               label="Cancel"
@@ -59,8 +75,7 @@ export function CreateSessionModal({
             />
           </View>
         </Pressable>
-      </Pressable>
-      </KeyboardSafeScreen>
+      </KeyboardModalFrame>
     </Modal>
   );
 }
@@ -69,16 +84,17 @@ const styles = StyleSheet.create({
   overlay: {
     flex: 1,
     backgroundColor: COLORS.overlay,
-  },
-  overlayInner: {
-    flex: 1,
-    justifyContent: 'center',
-    padding: SPACING[6],
+    paddingHorizontal: SPACING[6],
   },
   card: {
+    width: '100%',
+    maxWidth: 400,
+    maxHeight: '100%',
+    alignSelf: 'center',
     backgroundColor: COLORS.white,
     borderRadius: RADIUS.xl,
     padding: SPACING[6],
+    flexShrink: 1,
     ...SHADOWS.raised,
   },
   iconWrap: {
@@ -96,6 +112,13 @@ const styles = StyleSheet.create({
     fontSize: 20,
     textAlign: 'center',
     marginBottom: SPACING[5],
+  },
+  fields: {
+    flexShrink: 1,
+    minHeight: 0,
+  },
+  fieldsContent: {
+    flexGrow: 0,
   },
   label: {
     ...TYPE.label,

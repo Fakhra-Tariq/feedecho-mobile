@@ -4,6 +4,7 @@ import { useLocalSearchParams, useNavigation } from 'expo-router';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Dimensions,
   FlatList,
   Keyboard,
   Platform,
@@ -20,9 +21,11 @@ import { ChatMessageBubble } from '@/components/chat/ChatMessageBubble';
 import { showAlert } from '@/components/feedback';
 import {
   KEYBOARD_SCROLL_PROPS,
+  KeyboardBottomAnchor,
   KeyboardSafeScreen,
+  useKeyboardInset,
 } from '@/components/KeyboardSafeScreen';
-import { LogoutButton } from '@/components/LogoutButton';
+import { StudentAccountButton } from '@/components/HostProfileButton';
 import { COLORS, FONT_WEIGHTS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { cleanErrorMessage } from '@/lib/activeActivity';
@@ -37,7 +40,8 @@ import {
   leaveChat,
   type ChatJoinIdentity,
 } from '@/lib/anonymousChat';
-import { useSafeTabBarStyle } from '@/lib/tabBarSafeArea';
+import { recordLiveChatActivityJoin } from '@/lib/liveChatActivity';
+import { useBottomSpace } from '@/lib/tabBarSafeArea';
 import { toParticipantCount } from '@/lib/toParticipantCount';
 import { useRtdbList, useRtdbValue } from '@/lib/useRtdb';
 
@@ -58,10 +62,9 @@ export default function AudienceLiveChatScreen() {
   const { profile } = useAuth();
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
-  const tabBarStyle = useSafeTabBarStyle();
   const params = useLocalSearchParams<{ code?: string }>();
   const isGuest = Boolean(profile?.guest);
-  const { leave } = useLeaveActivity({ headerBack: !isGuest });
+  const { leave } = useLeaveActivity({ headerBack: false });
   const leftOnEndRef = useRef(false);
 
   const [sessionCode, setSessionCode] = useState('');
@@ -74,8 +77,12 @@ export default function AudienceLiveChatScreen() {
   const [storedGuestName, setStoredGuestName] = useState('');
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const listRef = useRef<FlatList>(null);
+  const inputBarRef = useRef<any>(null);
   const lastAutoJoinRef = useRef<string | null>(null);
-  const guestBottomMargin = 16 + (keyboardOpen ? 0 : insets.bottom);
+  const keyboardInset = useKeyboardInset();
+  // Stack screen (no tab bar). Guest already padded the card; logged-in did not,
+  // so the composer sat under the Android nav bar.
+  const cardBottomSpace = useBottomSpace({ keyboardOpen });
 
   const normalizedCode = useMemo(() => sessionCode.trim().toUpperCase(), [sessionCode]);
 
@@ -123,16 +130,44 @@ export default function AudienceLiveChatScreen() {
       navigation.setOptions({
         headerShown: false,
         headerRight: () => null,
-        tabBarStyle: { display: 'none' },
       });
       return;
     }
     navigation.setOptions({
       headerShown: true,
-      headerRight: () => <LogoutButton />,
-      tabBarStyle,
+      headerTitleAlign: 'center',
+      headerLeftContainerStyle: { flexShrink: 0 },
+      headerRightContainerStyle: { flexShrink: 0 },
+      headerTitleContainerStyle: { flex: 1, maxWidth: '48%', alignItems: 'center' },
+      headerLeft: () => (
+        <View style={styles.studentNavLeft}>
+          <Pressable
+            onPress={leave}
+            accessibilityRole="button"
+            accessibilityLabel="Back"
+            hitSlop={8}
+            style={styles.studentNavBack}>
+            <Ionicons name="arrow-back" size={24} color={COLORS.header} />
+          </Pressable>
+          <Text style={styles.studentNavBrand} numberOfLines={1}>
+            Live Chat
+          </Text>
+        </View>
+      ),
+      headerTitle: () =>
+        chatTitle ? (
+          <View style={styles.studentNavCenter}>
+            <Ionicons name="chatbubble-outline" size={16} color="#6B3A5C" />
+            <Text style={styles.studentNavTitle} numberOfLines={1}>
+              {chatTitle}
+            </Text>
+          </View>
+        ) : (
+          <View />
+        ),
+      headerRight: () => <StudentAccountButton />,
     });
-  }, [isGuest, navigation, tabBarStyle]);
+  }, [isGuest, navigation, chatTitle, leave]);
 
   useEffect(() => {
     if (!isGuest) return;
@@ -197,6 +232,18 @@ export default function AudienceLiveChatScreen() {
         }
         setChatId(response.data.id);
         await AsyncStorage.setItem(SESSION_CODE_KEY, codeToUse);
+        const studentUid = profile?.guest ? '' : String(profile?.uid || '').trim();
+        if (studentUid && response.data.id) {
+          void recordLiveChatActivityJoin({
+            studentUid,
+            studentEmail: String(profile?.email || '').trim() || null,
+            studentName: identity.name || null,
+            chatId: String(response.data.id),
+            title: response.data.title,
+          }).catch((error) => {
+            console.warn('[LiveChat activity] failed to record join', error);
+          });
+        }
       } catch (error) {
         const messageText =
           error instanceof Error ? error.message : 'Invalid or inactive chat session code';
@@ -206,7 +253,7 @@ export default function AudienceLiveChatScreen() {
         setIsJoining(false);
       }
     },
-    [isJoining, normalizedCode, profile?.guest, profile?.uid, profile?.name]
+    [isJoining, normalizedCode, profile?.guest, profile?.uid, profile?.email, profile?.name]
   );
 
   useEffect(() => {
@@ -255,10 +302,35 @@ export default function AudienceLiveChatScreen() {
   useEffect(() => {
     const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-    const showSub = Keyboard.addListener(showEvt, () => {
+    const showSub = Keyboard.addListener(showEvt, (event) => {
       setKeyboardOpen(true);
       requestAnimationFrame(() => {
         listRef.current?.scrollToEnd({ animated: true });
+      });
+      // TEMP DEBUG — remove after Guest Live Chat composer is fully above Gboard
+      const coords = event?.endCoordinates;
+      requestAnimationFrame(() => {
+        inputBarRef.current?.measureInWindow((_x: number, y: number, _w: number, h: number) => {
+          const inputBottom = Math.round(y + h);
+          const kbTop = Math.round(coords?.screenY || 0);
+          console.log('[TEMP DEBUG] Guest Live Chat keyboard', {
+            isGuest,
+            kbEventHeight: coords?.height,
+            kbEventScreenY: coords?.screenY,
+            windowH: Dimensions.get('window').height,
+            screenH: Dimensions.get('screen').height,
+            topInset: insets.top,
+            bottomInset: insets.bottom,
+            cardBottomSpace,
+            overlap: keyboardInset.overlap,
+            composerPadApplied: keyboardInset.overlap > 0 ? keyboardInset.overlap + 12 : 0,
+            inputBottom,
+            hiddenBehindKeyboardPx: Math.max(0, inputBottom - kbTop),
+            gapAboveKeyboardPx: kbTop - inputBottom,
+            guestHeaderApprox: isGuest ? insets.top + 48 : 0,
+            tabBarHeight: 0,
+          });
+        });
       });
     });
     const hideSub = Keyboard.addListener(hideEvt, () => setKeyboardOpen(false));
@@ -348,21 +420,15 @@ export default function AudienceLiveChatScreen() {
             </View>
           </View>
         </View>
-      ) : (
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>
-            {showActiveChat && chatSession?.title ? chatSession.title : 'Anonymous Chat'}
-          </Text>
-          <Text style={styles.headerSub}>{(profile?.name || 'Audience').trim()}</Text>
-        </View>
-      )}
+      ) : null}
 
       {showJoinForm ? (
         <View
           style={[
             styles.card,
             isGuest && styles.guestCardSpacing,
-            isGuest && { marginBottom: guestBottomMargin },
+            !isGuest && styles.studentCardSpacing,
+            { marginBottom: cardBottomSpace },
           ]}>
           <Text style={styles.cardTitle}>{isChatEnded ? 'Chat Ended' : 'Join Anonymous Chat'}</Text>
           <Text style={styles.cardBody}>
@@ -373,6 +439,7 @@ export default function AudienceLiveChatScreen() {
           {joinError ? <Text style={styles.error}>{joinError}</Text> : null}
           {!isChatEnded ? (
             <>
+              <KeyboardBottomAnchor>
               <TextInput
                 value={sessionCode}
                 onChangeText={(value) =>
@@ -395,6 +462,7 @@ export default function AudienceLiveChatScreen() {
                   <Text style={styles.joinLabel}>Join Chat</Text>
                 )}
               </TouchableOpacity>
+              </KeyboardBottomAnchor>
             </>
           ) : null}
         </View>
@@ -403,7 +471,8 @@ export default function AudienceLiveChatScreen() {
           style={[
             styles.activeCard,
             isGuest && styles.guestActiveCard,
-            isGuest && { marginBottom: guestBottomMargin },
+            !isGuest && styles.studentActiveCard,
+            { marginBottom: cardBottomSpace },
           ]}>
           <View style={styles.statusRow}>
             <Text style={styles.participants}>{participantCount} participants</Text>
@@ -425,9 +494,12 @@ export default function AudienceLiveChatScreen() {
             {...KEYBOARD_SCROLL_PROPS}
             contentContainerStyle={styles.messageContent}
             ListEmptyComponent={
-              <Text style={styles.empty}>
-                {canSendMessages ? 'Be the first to send a message!' : ' '}
-              </Text>
+              <View style={styles.emptyWrap}>
+                <Ionicons name="chatbubble-outline" size={48} color="#D1D5DB" />
+                {canSendMessages ? (
+                  <Text style={styles.empty}>Be the first to send a message!</Text>
+                ) : null}
+              </View>
             }
             renderItem={({ item }) => {
               const isOwn = isOwnStudentMessage(item);
@@ -444,7 +516,7 @@ export default function AudienceLiveChatScreen() {
           />
 
           {canSendMessages ? (
-            <View style={styles.inputBar}>
+            <KeyboardBottomAnchor ref={inputBarRef} style={styles.inputBar}>
               <TextInput
                 value={message}
                 onChangeText={setMessage}
@@ -460,7 +532,7 @@ export default function AudienceLiveChatScreen() {
                 disabled={!message.trim() || isSending}>
                 <Text style={styles.sendLabel}>{isSending ? '…' : 'Send'}</Text>
               </TouchableOpacity>
-            </View>
+            </KeyboardBottomAnchor>
           ) : null}
         </View>
       )}
@@ -519,15 +591,33 @@ const styles = StyleSheet.create({
     fontWeight: FONT_WEIGHTS.medium,
     color: '#2B1F27',
   },
-  header: {
-    backgroundColor: COLORS.white,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-    paddingHorizontal: SPACING[4],
-    paddingVertical: SPACING[3],
+  studentNavLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
-  headerTitle: { color: COLORS.text, fontSize: 20, fontWeight: FONT_WEIGHTS.bold },
-  headerSub: { color: COLORS.darkTextSecondary, marginTop: 2 },
+  studentNavBack: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  studentNavBrand: {
+    color: COLORS.header,
+    fontSize: 17,
+    fontWeight: FONT_WEIGHTS.semibold,
+  },
+  studentNavCenter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    minWidth: 0,
+    maxWidth: '100%',
+  },
+  studentNavTitle: {
+    flexShrink: 1,
+    fontSize: 14,
+    fontWeight: FONT_WEIGHTS.semibold,
+    color: '#2B1F27',
+  },
   card: {
     margin: SPACING[4],
     backgroundColor: COLORS.white,
@@ -537,6 +627,10 @@ const styles = StyleSheet.create({
     padding: SPACING[6],
   },
   guestCardSpacing: {
+    marginHorizontal: 16,
+    marginTop: 12,
+  },
+  studentCardSpacing: {
     marginHorizontal: 16,
     marginTop: 12,
   },
@@ -598,6 +692,11 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
     marginTop: 12,
   },
+  studentActiveCard: {
+    flex: 1,
+    marginHorizontal: 16,
+    marginTop: 12,
+  },
   statusRow: {
     paddingHorizontal: SPACING[4],
     paddingTop: SPACING[4],
@@ -620,7 +719,8 @@ const styles = StyleSheet.create({
   pillText: { color: COLORS.primary, fontSize: 12, fontWeight: FONT_WEIGHTS.medium, flexShrink: 1 },
   messageList: { flex: 1, marginTop: SPACING[2] },
   messageContent: { padding: SPACING[4], paddingBottom: SPACING[6], flexGrow: 1 },
-  empty: { textAlign: 'center', color: COLORS.darkTextSecondary, marginTop: SPACING[8] },
+  emptyWrap: { alignItems: 'center', paddingVertical: 32 },
+  empty: { textAlign: 'center', color: COLORS.darkTextSecondary, marginTop: SPACING[4] },
   inputBar: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -1,14 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
-import * as DocumentPicker from 'expo-document-picker';
-import * as ImagePicker from 'expo-image-picker';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
   Image,
-  KeyboardAvoidingView,
   Linking,
-  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -18,32 +14,32 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { KeyboardAwareBottomSheet } from '@/components/KeyboardAwareBottomSheet';
+import { useKeyboardIsOpen } from '@/components/KeyboardSafeScreen';
 import { showAlert, showToast } from '@/components/feedback';
 import { COLORS, FONT_WEIGHTS, SPACING } from '@/constants/theme';
 import { cleanErrorMessage } from '@/lib/activeActivity';
 import {
-  cacheLocalFileForUpload,
+  estimateDataUrlBytes,
+  formatChatFileSize,
+  MAX_CHAT_ATTACHMENT_BYTES,
+  pickTeamChatDocument,
+} from '@/lib/chatFileTransfer';
+import { DOWNLOAD_FAILED_MESSAGE, downloadAndOpenFile } from '@/lib/downloadAndOpenFile';
+import {
   fileToDataUrl,
   guessDocumentMime,
   prepareChatImage,
 } from '@/lib/compressChatImage';
 import { getTeamChatMessages, sendTeamChatMessage } from '@/lib/hostSpaceRaces';
+import {
+  pickGalleryImage,
+  showMediaPermissionAlert,
+  type PickedChatImage,
+} from '@/lib/pickChatImage';
 import { useRtdbList } from '@/lib/useRtdb';
 
-const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 const IMAGE_EXT = /\.(jpe?g|png|webp|gif)$/i;
-const DOCUMENT_EXT = /\.(pdf|doc|docx|txt|ppt|pptx|xls|xlsx)$/i;
-const DOCUMENT_TYPES = new Set([
-  'application/pdf',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'text/plain',
-  'application/vnd.ms-powerpoint',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'application/vnd.ms-excel',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-]);
-const DOCUMENT_PICKER_TYPES = [...DOCUMENT_TYPES];
 const URL_REGEX = /(https?:\/\/[^\s]+)/gi;
 const NEAR_BOTTOM_PX = 80;
 
@@ -52,12 +48,6 @@ const isAllowedImage = (name?: string, mime?: string) => {
   if (type.startsWith('video/') || type === 'image/svg+xml') return false;
   if (IMAGE_EXT.test(name || '')) return true;
   return type.startsWith('image/');
-};
-
-const isAllowedDocument = (name?: string, mime?: string) => {
-  const type = String(mime || '').toLowerCase();
-  if (type.startsWith('image/') || type.startsWith('video/')) return false;
-  return DOCUMENT_TYPES.has(type) || DOCUMENT_EXT.test(name || '');
 };
 
 function chatUploadErrorMessage(error: unknown) {
@@ -120,6 +110,34 @@ const mergeMessages = (...groups: any[][]) => {
   return sortMessages(Array.from(byId.values()));
 };
 
+function ChatBubbleImage({ uri }: { uri: string }) {
+  const [failed, setFailed] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  if (failed || !uri) {
+    return (
+      <View style={[styles.bubbleImage, styles.bubbleImageFallback]}>
+        <Ionicons name="image-outline" size={22} color={COLORS.inkSecondary} />
+      </View>
+    );
+  }
+  return (
+    <View style={styles.bubbleImage}>
+      {!loaded ? (
+        <View style={[StyleSheet.absoluteFill, styles.bubbleImageFallback]}>
+          <ActivityIndicator size="small" color={COLORS.primary} />
+        </View>
+      ) : null}
+      <Image
+        source={{ uri }}
+        style={styles.bubbleImage}
+        resizeMode="cover"
+        onLoad={() => setLoaded(true)}
+        onError={() => setFailed(true)}
+      />
+    </View>
+  );
+}
+
 type PendingFile = {
   uri: string;
   fileName: string;
@@ -139,10 +157,10 @@ type Props = {
 
 export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
   const insets = useSafeAreaInsets();
+  const keyboardOpen = useKeyboardIsOpen();
   const [open, setOpen] = useState(false);
   const [message, setMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const [imageSourceOpen, setImageSourceOpen] = useState(false);
   const [apiMessages, setApiMessages] = useState<any[]>([]);
   const [pendingMessages, setPendingMessages] = useState<any[]>([]);
   const [pendingAttachment, setPendingAttachment] = useState<PendingFile | null>(null);
@@ -158,6 +176,8 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
   const uploadFilesRef = useRef(new Map<string, PendingFile & { caption: string; running: boolean }>());
   const lastSeenTimestampRef = useRef<string | null>(null);
   const unreadHydratedRef = useRef(false);
+  const pickingImageRef = useRef(false);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
 
   const normalizedTeamId = teamId != null && teamId !== '' ? String(teamId) : null;
   const chatPath =
@@ -234,6 +254,11 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
     );
     return () => timers.forEach(clearTimeout);
   }, [open, scrollToBottom]);
+
+  useEffect(() => {
+    if (!open || !keyboardOpen) return;
+    requestAnimationFrame(() => scrollToBottom(true));
+  }, [keyboardOpen, open, scrollToBottom]);
 
   useEffect(() => {
     const last = messages[messages.length - 1];
@@ -432,7 +457,7 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
               width: file.width,
               height: file.height,
             })
-          : await cacheLocalFileForUpload(file);
+          : file;
       uploadFilesRef.current.set(optimisticId, {
         ...file,
         ...prepared,
@@ -441,18 +466,26 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
         running: true,
       });
       const preparedSize = prepared.size || file.size || 0;
-      if (preparedSize > MAX_ATTACHMENT_BYTES) {
+      if (preparedSize > MAX_CHAT_ATTACHMENT_BYTES) {
         throw new Error(
           `${file.kind === 'image' ? 'Image' : 'File'} too large. Maximum size is 100MB for chat.`
         );
       }
       const mimeType = guessDocumentMime(prepared.fileName || file.fileName, prepared.mimeType);
-      const downloadUrl = await fileToDataUrl(prepared.uri, mimeType, (ratio) => {
-        patchPending(optimisticId, {
-          uploadState: 'uploading',
-          uploadProgress: Math.round(ratio * 50),
-        });
-      });
+      const downloadUrl = await fileToDataUrl(
+        prepared.uri,
+        mimeType,
+        (ratio) => {
+          patchPending(optimisticId, {
+            uploadState: 'uploading',
+            uploadProgress: Math.round(ratio * 50),
+          });
+        },
+        {
+          maxBytes: MAX_CHAT_ATTACHMENT_BYTES,
+          tooLargeMessage: `${file.kind === 'image' ? 'Image' : 'File'} too large. Maximum size is 100MB for chat.`,
+        }
+      );
       if (!downloadUrl || !String(downloadUrl).startsWith('data:')) {
         throw new Error('Failed to read file');
       }
@@ -481,19 +514,6 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
       }
       uploadFilesRef.current.delete(optimisticId);
     } catch (error) {
-      const err = error as { code?: string; message?: string; serverResponse?: unknown };
-      console.error('Team chat upload failed', {
-        code: err?.code,
-        message: err?.message,
-        serverResponse: err?.serverResponse,
-        file: {
-          uri: file.uri,
-          name: file.fileName,
-          size: file.size,
-          mimeType: file.mimeType,
-          kind: file.kind,
-        },
-      });
       patchPending(optimisticId, { uploadState: 'error', uploadProgress: null, pending: true });
       showToast({
         type: 'info',
@@ -519,15 +539,22 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
       const file = pendingAttachment;
       setMessage('');
       setPendingAttachment(null);
-      await uploadAttachment(file, caption);
-      attachmentArmedRef.current = false;
+      try {
+        await uploadAttachment(file, caption);
+      } catch (error) {
+        showToast({ type: 'info', title: chatUploadErrorMessage(error) });
+        setPendingAttachment(file);
+        setMessage(caption);
+      } finally {
+        attachmentArmedRef.current = false;
+      }
       return;
     }
     await handleSendText();
   };
 
   const rejectOversized = (size: number | undefined, label: string) => {
-    if (!size || size <= MAX_ATTACHMENT_BYTES) return false;
+    if (!size || size <= MAX_CHAT_ATTACHMENT_BYTES) return false;
     showToast({
       type: 'info',
       title: `${label} too large. Maximum size is 100MB for chat.`,
@@ -535,108 +562,75 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
     return true;
   };
 
-  const pickFromCamera = async () => {
-    setImageSourceOpen(false);
-    if (composerBusy) return;
-    const permission = await ImagePicker.requestCameraPermissionsAsync();
-    if (!permission.granted) {
-      showAlert({
-        type: 'warning',
-        title: 'Permission needed',
-        message: 'Allow camera access to share a photo.',
-        primary: { label: 'Close' },
-      });
-      return;
-    }
-    const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ['images'],
-      quality: 1,
-      allowsEditing: false,
-      allowsMultipleSelection: false,
-    });
-    if (result.canceled || !result.assets?.[0]) return;
-    applyImageAsset(result.assets[0]);
-  };
-
-  const pickFromGallery = async () => {
-    setImageSourceOpen(false);
-    if (composerBusy) return;
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      showAlert({
-        type: 'warning',
-        title: 'Permission needed',
-        message: 'Allow photo library access to share an image.',
-        primary: { label: 'Close' },
-      });
-      return;
-    }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      quality: 1,
-      allowsEditing: false,
-      allowsMultipleSelection: false,
-    });
-    if (result.canceled || !result.assets?.[0]) return;
-    applyImageAsset(result.assets[0]);
-  };
-
-  const applyImageAsset = (asset: ImagePicker.ImagePickerAsset) => {
-    const fileName = asset.fileName || 'photo.jpg';
-    if (asset.type === 'video' || String(asset.mimeType || '').startsWith('video/')) {
+  const applyPickedImage = useCallback((asset: PickedChatImage) => {
+    if (rejectOversized(asset.size, 'Image')) return;
+    if (!isAllowedImage(asset.fileName, asset.mimeType)) {
       showToast({ type: 'info', title: 'Please choose an image.' });
       return;
     }
-    if (!isAllowedImage(fileName, asset.mimeType)) {
-      showToast({ type: 'info', title: 'Please choose an image.' });
-      return;
-    }
-    if (rejectOversized(asset.fileSize, 'Image')) return;
     setPendingAttachment({
       uri: asset.uri,
       previewUrl: asset.uri,
-      fileName,
+      fileName: asset.fileName,
       mimeType: asset.mimeType || 'image/jpeg',
-      size: asset.fileSize,
+      size: asset.size,
       width: asset.width,
       height: asset.height,
       kind: 'image',
     });
+  }, []);
+
+  const pickFromGallery = async () => {
+    if (composerBusy || pickingImageRef.current) return;
+    pickingImageRef.current = true;
+    try {
+      const result = await pickGalleryImage();
+      if (result.status === 'denied') {
+        showMediaPermissionAlert();
+      } else if (result.status === 'error') {
+        showToast({ type: 'info', title: result.message });
+      } else if (result.status === 'picked') {
+        applyPickedImage(result.asset);
+      }
+    } catch {
+      showToast({ type: 'info', title: 'Could not open the photo picker.' });
+    } finally {
+      pickingImageRef.current = false;
+    }
   };
 
   const pickDocument = async () => {
     if (composerBusy) return;
-    const result = await DocumentPicker.getDocumentAsync({
-      type: DOCUMENT_PICKER_TYPES,
-      copyToCacheDirectory: true,
-      multiple: false,
-    });
-    if (result.canceled || !result.assets?.[0]) return;
-    const asset = result.assets[0];
-    const fileName = asset.name || 'file';
-    if (isAllowedImage(fileName, asset.mimeType) || String(asset.mimeType || '').startsWith('video/')) {
-      showToast({ type: 'info', title: 'Please choose a document.' });
+    const result = await pickTeamChatDocument();
+    if (result.status === 'canceled') return;
+    if (result.status !== 'picked') {
+      showToast({ type: 'info', title: result.message });
       return;
     }
-    if (!isAllowedDocument(fileName, asset.mimeType)) {
-      showToast({ type: 'info', title: 'Please choose a supported document (pdf, doc, docx, txt, ppt, pptx, xls, xlsx).' });
-      return;
-    }
-    if (rejectOversized(asset.size, 'File')) return;
-    const cached = await cacheLocalFileForUpload({
-      uri: asset.uri,
-      fileName,
-      mimeType: guessDocumentMime(fileName, asset.mimeType),
-      size: asset.size,
-    });
-    if (rejectOversized(cached.size, 'File')) return;
     setPendingAttachment({
-      uri: cached.uri,
-      fileName,
-      mimeType: cached.mimeType,
-      size: cached.size,
+      uri: result.asset.uri,
+      fileName: result.asset.fileName,
+      mimeType: result.asset.mimeType,
+      size: result.asset.size,
       kind: 'file',
     });
+  };
+
+  const openFileMessage = async (msg: any) => {
+    const id = messageKey(msg);
+    if (!msg?.url || msg.uploadState === 'uploading' || downloadingId) return;
+    setDownloadingId(id);
+    try {
+      await downloadAndOpenFile(
+        msg.url,
+        msg.fileName,
+        guessDocumentMime(msg.fileName, msg.mimeType)
+      );
+    } catch {
+      showToast({ type: 'info', title: DOWNLOAD_FAILED_MESSAGE });
+    } finally {
+      setDownloadingId(null);
+    }
   };
 
   const onListScroll = (offsetY: number, contentHeight: number, layoutHeight: number) => {
@@ -677,11 +671,7 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
         <View>
           {msg.url ? (
             <Pressable onPress={() => setSelectedImage(msg.url)}>
-              <Image
-                source={{ uri: msg.url }}
-                style={styles.bubbleImage}
-                resizeMode="cover"
-              />
+              <ChatBubbleImage uri={msg.url} />
             </Pressable>
           ) : null}
           {caption ? <Text style={[styles.caption, { color: captionColor }]}>{caption}</Text> : null}
@@ -690,21 +680,34 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
       );
     }
     if (msg.type === 'file' && (msg.url || msg.fileName || msg.uploadState)) {
+      const cardBusy =
+        msg.uploadState === 'uploading' || downloadingId === messageKey(msg);
+      const sizeLabel =
+        formatChatFileSize(msg.fileSize) || formatChatFileSize(estimateDataUrlBytes(msg.url));
       return (
         <View>
           <Pressable
             onPress={() => {
-              if (msg.url && msg.uploadState !== 'uploading') Linking.openURL(msg.url);
+              if (msg.url && !cardBusy) openFileMessage(msg);
             }}
+            disabled={cardBusy || !msg.url}
+            accessibilityRole="button"
+            accessibilityLabel={`Download ${msg.fileName || 'file'}`}
             style={styles.fileCard}>
-            {msg.uploadState === 'uploading' ? (
+            {cardBusy ? (
               <ActivityIndicator size="small" color={COLORS.primary} />
             ) : (
-              <Ionicons name="document-text-outline" size={16} color={COLORS.primary} />
+              <Ionicons name="document-text-outline" size={18} color={COLORS.primary} />
             )}
-            <Text style={styles.fileName} numberOfLines={1}>
-              {msg.fileName || 'Download file'}
-            </Text>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={styles.fileName} numberOfLines={1}>
+                {msg.fileName || 'Download file'}
+              </Text>
+              {sizeLabel ? <Text style={styles.fileSize}>{sizeLabel}</Text> : null}
+            </View>
+            {!cardBusy ? (
+              <Ionicons name="download-outline" size={18} color={COLORS.primary} />
+            ) : null}
           </Pressable>
           {caption ? <Text style={[styles.caption, { color: captionColor }]}>{caption}</Text> : null}
           {renderUploadStatus(msg, isOwn)}
@@ -780,31 +783,104 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
         </Pressable>
       ) : null}
 
-      <Modal visible={open} transparent animationType="slide" onRequestClose={() => setOpen(false)}>
-        <KeyboardAvoidingView
-          style={styles.modalRoot}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <Pressable style={styles.backdrop} onPress={() => setOpen(false)} />
-          <View style={[styles.sheet, { paddingBottom: insets.bottom }]}>
-            <View style={styles.sheetHeader}>
-              <View style={styles.headerCopy}>
-                <Text style={styles.sheetTitle} numberOfLines={1}>
-                  Team {normalizedTeamId} Chat
-                </Text>
-                <Text style={styles.sheetSub} numberOfLines={1}>
-                  Team chat - only your team members can see these messages
-                </Text>
+      <KeyboardAwareBottomSheet
+        visible={open}
+        onClose={() => setOpen(false)}
+        header={
+          <View style={styles.sheetHeader}>
+            <View style={styles.headerCopy}>
+              <Text style={styles.sheetTitle} numberOfLines={1}>
+                Team {normalizedTeamId} Chat
+              </Text>
+              <Text style={styles.sheetSub} numberOfLines={1}>
+                Team chat - only your team members can see these messages
+              </Text>
+            </View>
+            <Pressable
+              onPress={() => setOpen(false)}
+              accessibilityRole="button"
+              accessibilityLabel="Close team chat"
+              hitSlop={8}
+              style={styles.close}>
+              <Ionicons name="close" size={22} color={COLORS.white} />
+            </Pressable>
+          </View>
+        }
+        footer={
+          <View style={styles.composer}>
+            {pendingAttachment ? (
+              <View style={styles.previewWrap}>
+                {pendingAttachment.kind === 'image' ? (
+                  <Image source={{ uri: pendingAttachment.previewUrl || pendingAttachment.uri }} style={styles.previewImg} />
+                ) : (
+                  <View style={styles.previewFile}>
+                    <Ionicons name="document-text-outline" size={16} color={COLORS.inkSecondary} />
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.previewName} numberOfLines={1}>
+                        {pendingAttachment.fileName}
+                      </Text>
+                      {formatChatFileSize(pendingAttachment.size) ? (
+                        <Text style={styles.previewSize}>
+                          {formatChatFileSize(pendingAttachment.size)}
+                        </Text>
+                      ) : null}
+                    </View>
+                  </View>
+                )}
+                <Pressable
+                  onPress={() => setPendingAttachment(null)}
+                  style={styles.previewClear}
+                  accessibilityLabel="Remove attachment">
+                  <Ionicons name="close" size={12} color={COLORS.white} />
+                </Pressable>
               </View>
+            ) : null}
+            <View style={styles.inputRow}>
               <Pressable
-                onPress={() => setOpen(false)}
-                accessibilityRole="button"
-                accessibilityLabel="Close team chat"
-                hitSlop={8}
-                style={styles.close}>
-                <Ionicons name="close" size={22} color={COLORS.white} />
+                onPress={() => {
+                  pickFromGallery().catch(() => undefined);
+                }}
+                disabled={composerBusy}
+                accessibilityLabel="Share image"
+                style={styles.iconBtn}>
+                <Ionicons name="image-outline" size={22} color={COLORS.inkSecondary} />
+              </Pressable>
+              <Pressable
+                onPress={pickDocument}
+                disabled={composerBusy}
+                accessibilityLabel="Share file"
+                style={styles.iconBtn}>
+                <Ionicons name="attach-outline" size={22} color={COLORS.inkSecondary} />
+              </Pressable>
+              <TextInput
+                value={message}
+                onChangeText={setMessage}
+                placeholder={pendingAttachment ? 'Add a caption...' : 'Message your team...'}
+                placeholderTextColor={COLORS.darkTextSecondary}
+                style={styles.chatInput}
+                editable={!composerBusy}
+                onSubmitEditing={handleSendComposer}
+                returnKeyType="send"
+              />
+              <Pressable
+                onPress={handleSendComposer}
+                disabled={(!message.trim() && !pendingAttachment) || composerBusy}
+                style={[
+                  styles.sendBtn,
+                  ((!message.trim() && !pendingAttachment) || composerBusy) && styles.disabled,
+                ]}
+                accessibilityLabel="Send">
+                {composerBusy ? (
+                  <ActivityIndicator size="small" color={COLORS.white} />
+                ) : (
+                  <Ionicons name="send" size={18} color={COLORS.white} />
+                )}
               </Pressable>
             </View>
-
+            {isSending ? <Text style={styles.sending}>Sending...</Text> : null}
+          </View>
+        }>
+            <View style={styles.listWrap}>
             <FlatList
               ref={listRef}
               data={messages}
@@ -847,90 +923,14 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
             {rtdbLoading && messages.length === 0 && !useApiFallback ? (
               <Text style={styles.syncNote}>Connecting to team chat...</Text>
             ) : null}
-
-            <View style={styles.composer}>
-              {pendingAttachment ? (
-                <View style={styles.previewWrap}>
-                  {pendingAttachment.kind === 'image' ? (
-                    <Image source={{ uri: pendingAttachment.previewUrl || pendingAttachment.uri }} style={styles.previewImg} />
-                  ) : (
-                    <View style={styles.previewFile}>
-                      <Ionicons name="document-text-outline" size={16} color={COLORS.inkSecondary} />
-                      <Text style={styles.previewName} numberOfLines={1}>
-                        {pendingAttachment.fileName}
-                      </Text>
-                    </View>
-                  )}
-                  <Pressable
-                    onPress={() => setPendingAttachment(null)}
-                    style={styles.previewClear}
-                    accessibilityLabel="Remove attachment">
-                    <Ionicons name="close" size={12} color={COLORS.white} />
-                  </Pressable>
-                </View>
-              ) : null}
-              <View style={styles.inputRow}>
-                <Pressable
-                  onPress={() => setImageSourceOpen(true)}
-                  disabled={composerBusy}
-                  accessibilityLabel="Share image"
-                  style={styles.iconBtn}>
-                  <Ionicons name="image-outline" size={22} color={COLORS.inkSecondary} />
-                </Pressable>
-                <Pressable
-                  onPress={pickDocument}
-                  disabled={composerBusy}
-                  accessibilityLabel="Share file"
-                  style={styles.iconBtn}>
-                  <Ionicons name="attach-outline" size={22} color={COLORS.inkSecondary} />
-                </Pressable>
-                <TextInput
-                  value={message}
-                  onChangeText={setMessage}
-                  placeholder={pendingAttachment ? 'Add a caption...' : 'Message your team...'}
-                  placeholderTextColor={COLORS.darkTextSecondary}
-                  style={styles.chatInput}
-                  editable={!composerBusy}
-                  onSubmitEditing={handleSendComposer}
-                  returnKeyType="send"
-                />
-                <Pressable
-                  onPress={handleSendComposer}
-                  disabled={(!message.trim() && !pendingAttachment) || composerBusy}
-                  style={[
-                    styles.sendBtn,
-                    ((!message.trim() && !pendingAttachment) || composerBusy) && styles.disabled,
-                  ]}
-                  accessibilityLabel="Send">
-                  <Ionicons name="send" size={18} color={COLORS.white} />
-                </Pressable>
-              </View>
-              {isSending ? <Text style={styles.sending}>Sending...</Text> : null}
             </View>
-
-            {imageSourceOpen ? (
-              <View style={styles.nestedOverlay} pointerEvents="box-none">
-                <Pressable style={styles.sheetBackdrop} onPress={() => setImageSourceOpen(false)} />
-                <View style={[styles.actionSheet, { paddingBottom: insets.bottom + SPACING[3] }]}>
-                  <View style={styles.handle} />
-                  <Pressable style={styles.actionRow} onPress={pickFromCamera}>
-                    <Text style={styles.actionLabel}>Take Photo</Text>
-                  </Pressable>
-                  <Pressable style={styles.actionRow} onPress={pickFromGallery}>
-                    <Text style={styles.actionLabel}>Choose from Gallery</Text>
-                  </Pressable>
-                </View>
-              </View>
-            ) : null}
 
             {selectedImage ? (
               <Pressable style={styles.lightbox} onPress={() => setSelectedImage(null)}>
                 <Image source={{ uri: selectedImage }} style={styles.lightboxImg} resizeMode="contain" />
               </Pressable>
             ) : null}
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+      </KeyboardAwareBottomSheet>
     </>
   );
 }
@@ -967,15 +967,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   badgeText: { color: COLORS.white, fontSize: 10, fontWeight: FONT_WEIGHTS.bold },
-  modalRoot: { flex: 1, justifyContent: 'flex-end' },
-  backdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.4)' },
-  sheet: {
-    height: '75%',
-    backgroundColor: COLORS.white,
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    overflow: 'hidden',
-  },
+  listWrap: { flex: 1, minHeight: 0 },
   sheetHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1017,7 +1009,12 @@ const styles = StyleSheet.create({
   time: { fontSize: 10, marginTop: 4, textAlign: 'right' },
   timeOwn: { color: 'rgba(255,255,255,0.7)' },
   timeOther: { color: '#9ca3af' },
-  bubbleImage: { width: 220, height: 160, borderRadius: 10 },
+  bubbleImage: { width: 220, height: 160, borderRadius: 10, overflow: 'hidden' },
+  bubbleImageFallback: {
+    backgroundColor: COLORS.surfaceMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   fileCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1026,9 +1023,13 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     borderColor: COLORS.border,
-    padding: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    minHeight: 44,
+    minWidth: 180,
   },
-  fileName: { flex: 1, color: COLORS.primary, fontSize: 13 },
+  fileName: { color: COLORS.primary, fontSize: 13, fontWeight: FONT_WEIGHTS.medium },
+  fileSize: { color: COLORS.mutedText, fontSize: 11, marginTop: 2 },
   linkCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1042,7 +1043,6 @@ const styles = StyleSheet.create({
   linkTitle: { color: COLORS.primary, fontWeight: FONT_WEIGHTS.medium, fontSize: 13 },
   linkUrl: { color: COLORS.mutedText, fontSize: 11 },
   uploadRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
-  nestedOverlay: { ...StyleSheet.absoluteFill, zIndex: 20 },
   uploadText: { fontSize: 12, marginTop: 4, color: COLORS.inkSecondary },
   retry: { textDecorationLine: 'underline', fontWeight: FONT_WEIGHTS.medium },
   composer: {
@@ -1065,7 +1065,8 @@ const styles = StyleSheet.create({
     paddingRight: 28,
     maxWidth: 220,
   },
-  previewName: { fontSize: 12, color: COLORS.text, maxWidth: 160 },
+  previewName: { fontSize: 12, color: COLORS.text },
+  previewSize: { fontSize: 11, color: COLORS.mutedText, marginTop: 1 },
   previewClear: {
     position: 'absolute',
     top: -6,
@@ -1098,27 +1099,6 @@ const styles = StyleSheet.create({
   },
   disabled: { opacity: 0.5 },
   sending: { fontSize: 12, color: COLORS.mutedText, marginTop: 6 },
-  sheetBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.4)' },
-  actionSheet: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: COLORS.white,
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-  },
-  handle: {
-    alignSelf: 'center',
-    width: 40,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: '#d4d4d4',
-    marginTop: 12,
-    marginBottom: 4,
-  },
-  actionRow: { minHeight: 48, paddingHorizontal: SPACING[4], justifyContent: 'center' },
-  actionLabel: { fontSize: 16, color: COLORS.text },
   lightbox: {
     ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(0,0,0,0.8)',

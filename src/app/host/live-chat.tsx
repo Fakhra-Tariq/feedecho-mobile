@@ -1,9 +1,11 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useNavigation } from 'expo-router';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  BackHandler,
   FlatList,
   Keyboard,
   Modal,
@@ -22,15 +24,17 @@ import { showAlert, showToast } from '@/components/feedback';
 import { cleanErrorMessage, showLaunchFailureAlert } from '@/lib/activeActivity';
 import { ActivityCreatedModal } from '@/components/ActivityCreatedModal';
 import { ConfirmModal } from '@/components/ConfirmModal';
+import { CreateSessionModal } from '@/components/CreateSessionModal';
+import { HeroHowItWorksLink } from '@/components/HostHeroChrome';
 import {
-  KEYBOARD_BOTTOM_GAP,
   KEYBOARD_SCROLL_PROPS,
+  KeyboardBottomAnchor,
+  KeyboardModalFrame,
   KeyboardSafeScreen,
 } from '@/components/KeyboardSafeScreen';
 import { COLORS, FONT_WEIGHTS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
-import { useHostSessions } from '@/context/HostSessionContext';
-import { getSessionActivityLabel } from '@/lib/sessionActivityLabel';
+import { useHostSessions, useSessionActivityLabel } from '@/context/HostSessionContext';
 import {
   addChatMessage,
   createAnonymousChat,
@@ -42,7 +46,6 @@ import {
   toggleChatModeration,
   type ChatSession,
 } from '@/lib/anonymousChat';
-import { TAB_BAR_CONTENT_HEIGHT } from '@/lib/tabBarSafeArea';
 import { toParticipantCount } from '@/lib/toParticipantCount';
 import { useRtdbList, useRtdbValue } from '@/lib/useRtdb';
 
@@ -61,7 +64,8 @@ function formatEndedDate(iso?: string) {
 
 export default function HostLiveChatScreen() {
   const { profile } = useAuth();
-  const { activeSession, quizzes } = useHostSessions();
+  const { activeSession, createSession } = useHostSessions();
+  const activityStatus = useSessionActivityLabel();
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const uid = profile?.uid || '';
@@ -90,7 +94,11 @@ export default function HostLiveChatScreen() {
   const [togglingMod, setTogglingMod] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
   const [howItWorksOpen, setHowItWorksOpen] = useState(false);
+  const [showCreateSession, setShowCreateSession] = useState(false);
+  const [sessionNameDraft, setSessionNameDraft] = useState('');
+  const [creatingSession, setCreatingSession] = useState(false);
   const syncedStatsRef = useRef(new Set<string>());
+  const selectedChatIdRef = useRef<string | null>(null);
   const listRef = useRef<FlatList>(null);
   const [pendingChatDeletes, setPendingChatDeletes] = useState<string[]>([]);
   const [pendingChatEnds, setPendingChatEnds] = useState<string[]>([]);
@@ -169,29 +177,38 @@ export default function HostLiveChatScreen() {
     setCodeCopied(false);
   }, [selectedChatId]);
 
+  selectedChatIdRef.current = selectedChatId;
+
   /**
-   * In-room back affordance: ← Chats was the only way back to the list
-   * (hardware back leaves live-chat entirely). Header chevron uses the
-   * same clear-selection handler without changing send/end/moderation logic.
+   * List and room share `/host/live-chat`. Default stack back (header arrow,
+   * Android hardware back, swipe) pops this screen to Explore. While a room
+   * is open, intercept that and only clear selectedChatId so the list
+   * returns; do not change chat data. List back then pops to Explore.
    */
-  useLayoutEffect(() => {
-    if (!selectedChatId) {
-      navigation.setOptions({ headerLeft: undefined });
-      return;
-    }
-    navigation.setOptions({
-      headerLeft: () => (
-        <Pressable
-          onPress={() => setSelectedChatId(null)}
-          style={styles.navBackBtn}
-          accessibilityRole="button"
-          accessibilityLabel="Back to chats"
-          hitSlop={8}>
-          <Ionicons name="chevron-back" size={26} color={COLORS.ink} />
-        </Pressable>
-      ),
+  useEffect(() => {
+    const closeOpenRoom = () => {
+      if (!selectedChatIdRef.current) return false;
+      setSelectedChatId(null);
+      return true;
+    };
+
+    const stopRemove = navigation.addListener('beforeRemove', (e: any) => {
+      if (!selectedChatIdRef.current) return;
+      const type = e?.data?.action?.type as string | undefined;
+      if (type && type !== 'GO_BACK' && type !== 'POP' && type !== 'POP_TO_TOP') {
+        return;
+      }
+      e.preventDefault();
+      setSelectedChatId(null);
     });
-  }, [navigation, selectedChatId]);
+
+    const hardware = BackHandler.addEventListener('hardwareBackPress', closeOpenRoom);
+
+    return () => {
+      stopRemove();
+      hardware.remove();
+    };
+  }, [navigation]);
 
   useEffect(() => {
     if (!selectedMessages.length) return;
@@ -266,6 +283,8 @@ export default function HostLiveChatScreen() {
       setIsCreating(false);
     }
   };
+
+  const openCreateChat = () => setShowCreate(true);
 
   const onToggleModeration = async () => {
     if (!selectedChatId || togglingMod) return;
@@ -379,9 +398,7 @@ export default function HostLiveChatScreen() {
           style={[
             styles.roomCard,
             {
-              marginBottom: keyboardOpen
-                ? KEYBOARD_BOTTOM_GAP
-                : TAB_BAR_CONTENT_HEIGHT + Math.max(insets.bottom, 8),
+              marginBottom: keyboardOpen ? 0 : Math.max(insets.bottom, 8),
             },
           ]}>
           <View style={styles.roomHeader}>
@@ -428,11 +445,11 @@ export default function HostLiveChatScreen() {
                 accessibilityRole="button"
                 accessibilityLabel={moderationOn ? 'Moderation ON' : 'Moderation OFF'}>
                 <Ionicons
-                  name={moderationOn ? 'shield-checkmark' : 'shield-outline'}
+                  name="settings-outline"
                   size={16}
-                  color={COLORS.ink}
+                  color={moderationOn ? COLORS.white : COLORS.primary}
                 />
-                <Text style={styles.moderationLabel}>
+                <Text style={[styles.moderationLabel, moderationOn && styles.moderationLabelOn]}>
                   {togglingMod ? '…' : moderationOn ? 'Moderation ON' : 'Moderation OFF'}
                 </Text>
               </Pressable>
@@ -496,7 +513,7 @@ export default function HostLiveChatScreen() {
           />
 
           {chatIsActive ? (
-            <View style={styles.inputBar}>
+            <KeyboardBottomAnchor style={styles.inputBar}>
               <View style={styles.inputPill}>
                 <TextInput
                   value={messageDraft}
@@ -516,7 +533,7 @@ export default function HostLiveChatScreen() {
                   <Ionicons name="send" size={16} color={COLORS.white} />
                 </Pressable>
               </View>
-            </View>
+            </KeyboardBottomAnchor>
           ) : null}
         </View>
 
@@ -531,7 +548,6 @@ export default function HostLiveChatScreen() {
   }
 
   const sessionCode = activeSession?.sessionCode || '—';
-  const activityStatus = getSessionActivityLabel(activeSession?.currentActivity, quizzes);
 
   return (
     <View style={styles.screen}>
@@ -546,43 +562,44 @@ export default function HostLiveChatScreen() {
             size={16}
             color="#6B3A5C"
           />
-          <Text style={styles.sessionPillText}>
-            {activeSession ? (
-              <>
-                {'Launching to session: '}
-                <Text style={styles.sessionPillCode}>{sessionCode}</Text>
-                {` · ${activityStatus}`}
-              </>
-            ) : (
-              'No active session — create one on Explore to launch chats.'
-            )}
-          </Text>
+          {activeSession ? (
+            <Text style={styles.sessionPillText}>
+              {'Launching to session: '}
+              <Text style={styles.sessionPillCode}>{sessionCode}</Text>
+              {` · ${activityStatus}`}
+            </Text>
+          ) : (
+            <Text style={styles.sessionPillText}>
+              {"You'll need an active session to launch this. "}
+              <Text
+                style={styles.sessionPillLink}
+                onPress={() => setShowCreateSession(true)}
+                accessibilityRole="link">
+                Create Session
+              </Text>
+            </Text>
+          )}
         </View>
 
-        <View style={styles.heroCard}>
+        <LinearGradient
+          colors={['#6D415F', 'rgba(109,65,95,0.92)', '#3A2E2A']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.heroCard}>
           <View style={styles.heroTitleRow}>
             <Text style={styles.heroTitle}>Anonymous Chat</Text>
-            <Pressable
-              onPress={() => setHowItWorksOpen(true)}
-              style={({ pressed }) => [styles.howItWorksBtn, pressed && styles.pressed]}
-              hitSlop={8}
-              accessibilityRole="button"
-              accessibilityLabel="How it works">
-              <Ionicons name="help-circle-outline" size={14} color="#EADBE5" />
-              <Text style={styles.howItWorksLabel}>How it works</Text>
-              <Ionicons name="chevron-forward" size={12} color="#EADBE5" />
-            </Pressable>
+            <HeroHowItWorksLink onPress={() => setHowItWorksOpen(true)} />
           </View>
           <Text style={styles.heroSubtitle}>Anonymous Q&A and feedback sessions</Text>
           <Pressable
             style={({ pressed }) => [styles.newChatBtn, pressed && styles.newChatBtnPressed]}
-            onPress={() => setShowCreate(true)}
+            onPress={openCreateChat}
             accessibilityRole="button"
             accessibilityLabel="New chat">
-            <Ionicons name="chatbubble-outline" size={18} color="#6B3A5C" />
+            <Ionicons name="chatbubble-outline" size={18} color="#6D415F" />
             <Text style={styles.newChatLabel}>New Chat</Text>
           </Pressable>
-        </View>
+        </LinearGradient>
 
         <View style={styles.contentCard}>
           <View style={styles.tabs}>
@@ -607,25 +624,31 @@ export default function HostLiveChatScreen() {
 
           {listed.length === 0 ? (
             <View style={styles.emptyWrap}>
-              <View style={styles.emptyIconCircle}>
-                <Ionicons name="chatbubbles-outline" size={22} color="#6B3A5C" />
-              </View>
               {listTab === 'active' ? (
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.emptyCreateBtn,
-                    pressed && styles.emptyCreateBtnPressed,
-                  ]}
-                  onPress={() => setShowCreate(true)}
-                  accessibilityRole="button"
-                  accessibilityLabel="Create chat">
-                  <Ionicons name="chatbubble-outline" size={18} color={COLORS.white} />
-                  <Text style={styles.emptyCreateLabel}>Create Chat</Text>
-                </Pressable>
+                <>
+                  <View style={styles.emptyIconCircle}>
+                    <Ionicons name="chatbubbles-outline" size={22} color="#6B3A5C" />
+                  </View>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.emptyCreateBtn,
+                      pressed && styles.emptyCreateBtnPressed,
+                    ]}
+                    onPress={openCreateChat}
+                    accessibilityRole="button"
+                    accessibilityLabel="Create chat">
+                    <Ionicons name="add" size={18} color={COLORS.white} />
+                    <Text style={styles.emptyCreateLabel}>Create Chat</Text>
+                  </Pressable>
+                </>
               ) : (
                 <>
+                  <Ionicons
+                    name="time-outline"
+                    size={24}
+                    color="rgba(109,65,95,0.3)"
+                  />
                   <Text style={styles.emptyTitle}>No past chats</Text>
-                  <Text style={styles.emptyMessage}>Ended chats will appear here.</Text>
                 </>
               )}
             </View>
@@ -775,23 +798,20 @@ export default function HostLiveChatScreen() {
         animationType="fade"
         onRequestClose={() => setShowCreate(false)}
         statusBarTranslucent>
-        <KeyboardSafeScreen scroll={false} variant="modal" style={styles.createModalRoot}>
-          <View style={styles.createModalCenter}>
-            <Pressable
-              style={styles.createBackdrop}
-              onPress={() => setShowCreate(false)}
-              accessibilityRole="button"
-              accessibilityLabel="Cancel"
-            />
+        <View style={styles.createModalRoot}>
+          <KeyboardModalFrame
+            style={styles.createBackdropFill}
+            onBackdropPress={() => setShowCreate(false)}>
             <View style={styles.createCard} accessibilityViewIsModal>
-              <ScrollView
-                {...KEYBOARD_SCROLL_PROPS}
-                bounces={false}
-                showsVerticalScrollIndicator={false}
-                contentContainerStyle={styles.createCardScroll}>
-                <Text style={styles.createModalTitle}>Create Anonymous Chat</Text>
-                <View style={styles.createDivider} />
+              <Text style={styles.createModalTitle}>Create Anonymous Chat</Text>
+              <View style={styles.createDivider} />
 
+              <ScrollView
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+                bounces={false}
+                style={styles.createCardScroll}
+                contentContainerStyle={{ flexGrow: 0 }}>
                 <Text style={[styles.createFieldLabel, { marginTop: 16 }]}>Chat Title</Text>
                 <TextInput
                   value={createTitle}
@@ -813,41 +833,41 @@ export default function HostLiveChatScreen() {
                   textAlignVertical="top"
                   accessibilityLabel="Description"
                 />
-
-                <View style={[styles.createDivider, { marginTop: 16 }]} />
-
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.createSubmitBtn,
-                    (!createTitle.trim() || isCreating) && styles.createSubmitDisabled,
-                    createTitle.trim() && !isCreating && pressed && styles.createSubmitPressed,
-                  ]}
-                  onPress={onCreate}
-                  disabled={!createTitle.trim() || isCreating}
-                  accessibilityRole="button"
-                  accessibilityLabel="Create chat"
-                  accessibilityState={{ disabled: !createTitle.trim() || isCreating }}>
-                  {isCreating ? (
-                    <ActivityIndicator color={COLORS.white} />
-                  ) : (
-                    <Text style={styles.createSubmitLabel}>Create Chat</Text>
-                  )}
-                </Pressable>
-
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.createCancelBtn,
-                    pressed && styles.createCancelPressed,
-                  ]}
-                  onPress={() => setShowCreate(false)}
-                  accessibilityRole="button"
-                  accessibilityLabel="Cancel">
-                  <Text style={styles.createCancelLabel}>Cancel</Text>
-                </Pressable>
               </ScrollView>
+
+              <View style={[styles.createDivider, { marginTop: 16 }]} />
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.createSubmitBtn,
+                  (!createTitle.trim() || isCreating) && styles.createSubmitDisabled,
+                  createTitle.trim() && !isCreating && pressed && styles.createSubmitPressed,
+                ]}
+                onPress={onCreate}
+                disabled={!createTitle.trim() || isCreating}
+                accessibilityRole="button"
+                accessibilityLabel="Create chat"
+                accessibilityState={{ disabled: !createTitle.trim() || isCreating }}>
+                {isCreating ? (
+                  <ActivityIndicator color={COLORS.white} />
+                ) : (
+                  <Text style={styles.createSubmitLabel}>Create Chat</Text>
+                )}
+              </Pressable>
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.createCancelBtn,
+                  pressed && styles.createCancelPressed,
+                ]}
+                onPress={() => setShowCreate(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel">
+                <Text style={styles.createCancelLabel}>Cancel</Text>
+              </Pressable>
             </View>
-          </View>
-        </KeyboardSafeScreen>
+          </KeyboardModalFrame>
+        </View>
       </Modal>
 
       <ActivityCreatedModal
@@ -855,6 +875,37 @@ export default function HostLiveChatScreen() {
         title="Chat Created"
         code={createdCode}
         onClose={() => setCreatedCode('')}
+      />
+
+      <CreateSessionModal
+        visible={showCreateSession}
+        title="Create Session"
+        value={sessionNameDraft}
+        onChangeText={setSessionNameDraft}
+        submitting={creatingSession}
+        onCancel={() => {
+          setShowCreateSession(false);
+          setSessionNameDraft('');
+        }}
+        onSubmit={async () => {
+          if (creatingSession || !sessionNameDraft.trim()) return;
+          setCreatingSession(true);
+          try {
+            await createSession(sessionNameDraft.trim());
+            setShowCreateSession(false);
+            setSessionNameDraft('');
+            showToast({ type: 'success', title: 'Created', message: 'Session created successfully!' });
+          } catch (error) {
+            showAlert({
+              type: 'error',
+              title: 'Could not create session',
+              message: cleanErrorMessage(error, 'Try again'),
+              primary: { label: 'Close' },
+            });
+          } finally {
+            setCreatingSession(false);
+          }
+        }}
       />
 
       <ConfirmModal
@@ -899,14 +950,17 @@ const styles = StyleSheet.create({
   sessionPillCode: {
     fontWeight: FONT_WEIGHTS.bold,
   },
+  sessionPillLink: {
+    fontWeight: FONT_WEIGHTS.semibold,
+    color: '#6D415F',
+    textDecorationLine: 'underline',
+  },
   heroCard: {
     marginHorizontal: 16,
     marginTop: 12,
-    borderRadius: 24,
-    padding: 18,
+    borderRadius: 16,
+    padding: 20,
     overflow: 'hidden',
-    // Solid plum — expo-linear-gradient not installed (Web: #6D415F → #3A2E2A).
-    backgroundColor: '#6B3A5C',
   },
   heroTitleRow: {
     flexDirection: 'row',
@@ -951,46 +1005,46 @@ const styles = StyleSheet.create({
     backgroundColor: '#F4EAF0',
   },
   newChatLabel: {
-    color: '#6B3A5C',
-    fontSize: 15,
-    fontWeight: FONT_WEIGHTS.semibold,
+    color: '#6D415F',
+    fontSize: 14,
+    fontWeight: FONT_WEIGHTS.medium,
   },
   contentCard: {
     backgroundColor: COLORS.white,
-    borderRadius: 24,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#E8DFE6',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(109,65,95,0.15)',
     padding: 12,
     marginHorizontal: 16,
-    marginTop: 16,
+    marginTop: 12,
   },
-  tabs: { flexDirection: 'row', gap: 10 },
+  tabs: { flexDirection: 'row', gap: 8, marginBottom: 8 },
   tab: {
     flex: 1,
-    height: 44,
+    minHeight: 44,
     borderRadius: 12,
     backgroundColor: COLORS.white,
     borderWidth: 1,
-    borderColor: '#CFC6CD',
+    borderColor: 'rgba(109,65,95,0.4)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   tabOn: {
-    backgroundColor: '#F1E4EC',
-    borderColor: '#E3CFDB',
+    backgroundColor: '#F1E5EB',
+    borderColor: '#F1E5EB',
   },
   tabLabel: {
-    color: '#2B1F27',
+    color: '#6D415F',
     fontSize: 14,
-    fontWeight: FONT_WEIGHTS.medium,
+    fontWeight: FONT_WEIGHTS.semibold,
   },
   tabLabelOn: {
-    color: '#4A1F3D',
+    color: '#6D415F',
   },
   emptyWrap: {
     alignItems: 'center',
-    paddingVertical: SPACING[10],
-    paddingHorizontal: SPACING[4],
+    paddingVertical: 24,
+    paddingHorizontal: 12,
   },
   emptyIconCircle: {
     width: 48,
@@ -1023,10 +1077,9 @@ const styles = StyleSheet.create({
     fontWeight: FONT_WEIGHTS.semibold,
   },
   emptyTitle: {
-    marginTop: 12,
-    color: COLORS.ink,
-    fontSize: 15,
-    fontWeight: FONT_WEIGHTS.medium,
+    marginTop: 8,
+    color: COLORS.darkTextSecondary,
+    fontSize: 12,
     textAlign: 'center',
   },
   emptyMessage: {
@@ -1190,13 +1243,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: FONT_WEIGHTS.semibold,
   },
-  navBackBtn: {
-    width: 44,
-    height: 44,
-    marginLeft: SPACING[1],
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   roomCard: {
     flex: 1,
     marginHorizontal: 12,
@@ -1271,25 +1317,28 @@ const styles = StyleSheet.create({
   },
   moderationBtn: {
     flex: 1,
-    height: 44,
+    minHeight: 44,
     borderRadius: 12,
     backgroundColor: COLORS.white,
     borderWidth: 1,
-    borderColor: COLORS.tabIdleBorder,
+    borderColor: 'rgba(109,65,95,0.4)',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
+    gap: 8,
     paddingHorizontal: 8,
   },
   moderationBtnOn: {
-    backgroundColor: COLORS.plumTint,
-    borderColor: COLORS.plum,
+    backgroundColor: '#6D415F',
+    borderColor: '#6D415F',
   },
   moderationLabel: {
-    color: COLORS.ink,
+    color: '#6D415F',
     fontSize: 14,
     fontWeight: FONT_WEIGHTS.medium,
+  },
+  moderationLabelOn: {
+    color: COLORS.white,
   },
   endChatBtn: {
     flex: 1.4,
@@ -1383,29 +1432,25 @@ const styles = StyleSheet.create({
   },
   disabled: { opacity: 0.6 },
   createModalRoot: { flex: 1 },
-  createModalCenter: {
+  createBackdropFill: {
     flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  createBackdrop: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
     backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 20,
   },
   createCard: {
-    width: '90%',
+    width: '100%',
     maxWidth: 400,
-    maxHeight: '85%',
+    maxHeight: '100%',
+    alignSelf: 'center',
     backgroundColor: COLORS.white,
     borderRadius: 24,
     padding: 20,
+    flexShrink: 1,
     zIndex: 1,
   },
   createCardScroll: {
+    flexShrink: 1,
+    minHeight: 0,
     paddingBottom: 4,
   },
   createModalTitle: {
@@ -1443,9 +1488,10 @@ const styles = StyleSheet.create({
   },
   createSubmitBtn: {
     marginTop: 16,
+    minHeight: 44,
     height: 48,
     borderRadius: 12,
-    backgroundColor: '#6B3A5C',
+    backgroundColor: '#6D415F',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1462,17 +1508,17 @@ const styles = StyleSheet.create({
   },
   createCancelBtn: {
     marginTop: 10,
-    height: 44,
+    minHeight: 44,
     borderRadius: 12,
-    backgroundColor: '#F1EDF0',
+    backgroundColor: '#F3F4F6',
     alignItems: 'center',
     justifyContent: 'center',
   },
   createCancelPressed: {
-    backgroundColor: '#E6E0E4',
+    backgroundColor: '#E5E7EB',
   },
   createCancelLabel: {
-    color: '#2B1F27',
+    color: COLORS.darkTextSecondary,
     fontSize: 15,
     fontWeight: FONT_WEIGHTS.medium,
   },

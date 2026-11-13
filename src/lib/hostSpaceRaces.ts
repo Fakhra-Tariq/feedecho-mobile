@@ -228,15 +228,29 @@ export async function setTeamSelection(
     auth: false,
     body: {
       ...data,
+      teamId: data.teamId != null ? String(data.teamId) : data.teamId,
       senderName: data.senderName || data.participantName,
     },
   });
 }
 
+/** Same GET Web uses so a teammate who reconnects reads the current lock, not only future events. */
+export async function getTeamSelection(
+  raceId: string,
+  teamId: number | string,
+  questionId: string
+) {
+  const qs = `?teamId=${encodeURIComponent(String(teamId))}&questionId=${encodeURIComponent(questionId)}`;
+  return apiRequest<{ success?: boolean; data?: any }>(
+    `/space-races/${raceId}/team-selection${qs}`,
+    { auth: false }
+  );
+}
+
 export async function submitRaceAnswer(
   raceId: string,
   answerData: {
-    teamId: number;
+    teamId: number | string;
     questionId: string;
     answer: unknown;
     participantId: string;
@@ -263,7 +277,7 @@ export async function startTeamQuiz(
 
 export async function getFinalScore(
   raceId: string,
-  params: { teamId: number; participantId: string }
+  params: { teamId: number | string; participantId: string }
 ) {
   const qs = `?teamId=${params.teamId}&participantId=${encodeURIComponent(params.participantId)}`;
   return apiRequest(`/space-races/${raceId}/final-score${qs}`, { auth: false });

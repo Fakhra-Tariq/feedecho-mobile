@@ -1,3 +1,4 @@
+import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router, type Href } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
@@ -18,7 +19,7 @@ import {
   KeyboardSafeScreen,
 } from '@/components/KeyboardSafeScreen';
 import { LaunchQuizSettingsModal } from '@/components/LaunchQuizSettingsModal';
-import { COLORS, FONT_WEIGHTS, SPACING } from '@/constants/theme';
+import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING } from '@/constants/theme';
 import { useHostSessions } from '@/context/HostSessionContext';
 import {
   AI_GENERATED_QUIZ_SOURCE,
@@ -112,6 +113,20 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
   }, [initialQuiz, quizType]);
 
   const heading = useMemo(() => `Create ${quizType} Quiz`, [quizType]);
+  const isMixedType = quizType === 'Mixed Type';
+
+  const emptyHelper = useMemo(() => {
+    if (quizType === 'Multiple Choice') {
+      return 'Click "Add Question" to start creating your multiple choice quiz';
+    }
+    if (quizType === 'True / False') {
+      return 'Click "Add Question" to start creating your true/false quiz';
+    }
+    if (quizType === 'Short Answer') {
+      return 'Click "Add Question" to start creating your short answer quiz';
+    }
+    return 'Click "Add Question" to start creating your mixed type quiz';
+  }, [quizType]);
 
   const addQuestion = (mixedType?: 'multiple-choice' | 'true-false' | 'short-answer') => {
     setSaved(false);
@@ -149,10 +164,9 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
     });
   };
 
-  const validate = () => {
+  const validationError = useMemo(() => {
     if (!title.trim() || questions.length === 0) {
-      validationAlert('Add a quiz title and at least one question before saving.');
-      return false;
+      return 'Add a quiz title and at least one question before saving.';
     }
     if (quizType === 'Multiple Choice') {
       const ok = questions.every(
@@ -161,24 +175,15 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
           q.options?.some((opt: any) => opt.text?.trim()) &&
           q.options?.filter((opt: any) => opt.isCorrect).length === 1
       );
-      if (!ok) {
-        validationAlert('Complete all questions and select exactly one correct answer.');
-        return false;
-      }
+      if (!ok) return 'Complete all questions and select exactly one correct answer.';
     }
     if (quizType === 'True / False') {
       const ok = questions.every((q) => q.questionText?.trim() && q.correctAnswer !== null);
-      if (!ok) {
-        validationAlert('Complete all questions and choose True or False.');
-        return false;
-      }
+      if (!ok) return 'Complete all questions and choose True or False.';
     }
     if (quizType === 'Short Answer') {
       const ok = questions.every((q) => q.questionText?.trim() && q.sampleAnswer?.trim());
-      if (!ok) {
-        validationAlert('Complete all questions and sample answers.');
-        return false;
-      }
+      if (!ok) return 'Complete all questions and sample answers.';
     }
     if (quizType === 'Mixed Type') {
       const ok = questions.every((q) => {
@@ -189,13 +194,20 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
         if (q.type === 'true-false') return q.correctAnswer !== undefined;
         return Boolean(q.sampleAnswer?.trim());
       });
-      if (!ok) {
-        validationAlert('Complete all questions with required information.');
-        return false;
-      }
+      if (!ok) return 'Complete all questions with required information.';
+    }
+    return null;
+  }, [title, questions, quizType]);
+
+  const validate = () => {
+    if (validationError) {
+      validationAlert(validationError);
+      return false;
     }
     return true;
   };
+
+  const showLaunchButton = !validationError && saved && Boolean(quizId);
 
   const save = async () => {
     if (saving || !validate()) return;
@@ -216,7 +228,8 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
       const savedQuiz = wasUpdate
         ? await updateQuiz(quizId as string, payload)
         : await createQuiz(payload);
-      setQuizId(savedQuiz.id);
+      if (!savedQuiz?.id) throw new Error('Failed to save quiz');
+      setQuizId(String(savedQuiz.id));
       setSaved(true);
       showToast({
         type: 'success',
@@ -262,37 +275,118 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
       style={styles.screen}
       contentContainerStyle={[styles.content, { paddingBottom: SPACING[16] + KEYBOARD_BOTTOM_GAP }]}>
         <Text style={styles.heading}>{heading}</Text>
-        <View style={styles.actions}>
-          <TouchableOpacity style={styles.secondary} onPress={() => setShowAi(true)}>
-            <Text style={styles.secondaryLabel}>AI Generator</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.primary} onPress={save} disabled={saving}>
-            <Text style={styles.primaryLabel}>{saving ? 'Saving…' : saved ? 'Saved' : 'Save Quiz'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.launch} onPress={openLaunch}>
-            <Text style={styles.primaryLabel}>Launch Quiz</Text>
-          </TouchableOpacity>
-        </View>
+        {isMixedType ? (
+          <>
+            <Text style={styles.subtitle}>
+              Add your quiz title and start creating questions with different types
+            </Text>
+            <View style={styles.actions}>
+              <TouchableOpacity
+                style={styles.mixedAiBtn}
+                onPress={() => setShowAi(true)}
+                accessibilityRole="button"
+                accessibilityLabel="AI Generator">
+                <Ionicons name="sparkles-outline" size={18} color={COLORS.primary} />
+                <Text style={styles.mixedAiBtnLabel}>AI Generator</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.saveBtn,
+                  saved && !saving && styles.saveBtnSaved,
+                  saving && styles.saveBtnDisabled,
+                ]}
+                onPress={save}
+                disabled={saving}
+                accessibilityRole="button"
+                accessibilityLabel="Save Quiz">
+                <Ionicons
+                  name={saved && !saving ? 'checkmark' : 'save-outline'}
+                  size={18}
+                  color={saved && !saving ? COLORS.primary : COLORS.white}
+                />
+                <Text style={[styles.saveBtnLabel, saved && !saving && styles.saveBtnSavedLabel]}>
+                  {saving ? 'Saving…' : saved ? 'Saved' : 'Save Quiz'}
+                </Text>
+              </TouchableOpacity>
+              {showLaunchButton ? (
+                <View style={styles.launchWrap}>
+                  <TouchableOpacity
+                    style={styles.launchBtn}
+                    onPress={openLaunch}
+                    accessibilityRole="button"
+                    accessibilityLabel="Launch Quiz">
+                    <Ionicons name="rocket-outline" size={18} color={COLORS.white} />
+                    <Text style={styles.saveBtnLabel}>Launch Quiz</Text>
+                  </TouchableOpacity>
+                  <Text style={styles.launchHint}>Requires an active session</Text>
+                </View>
+              ) : null}
+            </View>
+          </>
+        ) : (
+          <>
+            <Text style={styles.subtitle}>Add your quiz title and start creating questions</Text>
+            <View style={styles.actions}>
+              <TouchableOpacity
+                style={[
+                  styles.saveBtn,
+                  saved && !saving && styles.saveBtnSaved,
+                  saving && styles.saveBtnDisabled,
+                ]}
+                onPress={save}
+                disabled={saving}
+                accessibilityRole="button"
+                accessibilityLabel="Save Quiz">
+                <Ionicons
+                  name={saved && !saving ? 'checkmark' : 'save-outline'}
+                  size={18}
+                  color={saved && !saving ? COLORS.primary : COLORS.white}
+                />
+                <Text style={[styles.saveBtnLabel, saved && !saving && styles.saveBtnSavedLabel]}>
+                  {saving ? 'Saving…' : saved ? 'Saved' : 'Save Quiz'}
+                </Text>
+              </TouchableOpacity>
+              {showLaunchButton ? (
+                <View style={styles.launchWrap}>
+                  <TouchableOpacity
+                    style={styles.launchBtn}
+                    onPress={openLaunch}
+                    accessibilityRole="button"
+                    accessibilityLabel="Launch Quiz">
+                    <Ionicons name="rocket-outline" size={18} color={COLORS.white} />
+                    <Text style={styles.saveBtnLabel}>Launch Quiz</Text>
+                  </TouchableOpacity>
+                  <Text style={styles.launchHint}>Requires an active session</Text>
+                </View>
+              ) : null}
+            </View>
+          </>
+        )}
 
-        <Text style={styles.label}>Quiz Title</Text>
-        <TextInput
-          value={title}
-          onChangeText={(value) => {
-            setSaved(false);
-            setTitle(value);
-          }}
-          placeholder="Enter quiz title"
-          placeholderTextColor={COLORS.darkTextSecondary}
-          style={styles.input}
-        />
+        <View style={styles.titleCard}>
+          <Text style={styles.label}>Quiz Title</Text>
+          <TextInput
+            value={title}
+            onChangeText={(value) => {
+              setSaved(false);
+              setTitle(value);
+            }}
+            placeholder="Enter your quiz title..."
+            placeholderTextColor={COLORS.darkTextSecondary}
+            style={styles.titleInput}
+          />
+        </View>
 
         <Text style={styles.section}>Questions</Text>
         {questions.map((question, index) => (
           <View key={question.id || index} style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.cardTitle}>Question {index + 1}</Text>
-              <TouchableOpacity onPress={() => removeQuestion(index)}>
-                <Text style={styles.delete}>Delete</Text>
+              <TouchableOpacity
+                onPress={() => removeQuestion(index)}
+                accessibilityRole="button"
+                accessibilityLabel="Remove">
+                <Text style={styles.delete}>Remove</Text>
               </TouchableOpacity>
             </View>
             <TextInput
@@ -386,7 +480,28 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
           </View>
         ))}
 
-        {quizType === 'Mixed Type' ? (
+        {questions.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyEmoji}>📝</Text>
+            <Text style={styles.emptyTitle}>No questions yet</Text>
+            <Text style={styles.emptyHelper}>{emptyHelper}</Text>
+            <TouchableOpacity
+              style={styles.addFirstBtn}
+              onPress={() => addQuestion()}
+              accessibilityRole="button"
+              accessibilityLabel="Add First Question">
+              <Ionicons name="add" size={18} color={COLORS.white} />
+              <Text style={styles.addFirstLabel}>+ Add First Question</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.aiBtn}
+              onPress={() => setShowAi(true)}
+              accessibilityRole="button"
+              accessibilityLabel="AI Generator">
+              <Text style={styles.aiBtnLabel}>AI Generator</Text>
+            </TouchableOpacity>
+          </View>
+        ) : quizType === 'Mixed Type' ? (
           <View style={styles.addRow}>
             <TouchableOpacity style={styles.addBtn} onPress={() => addQuestion('multiple-choice')}>
               <Text style={styles.addLabel}>+ MCQ</Text>
@@ -399,9 +514,23 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
             </TouchableOpacity>
           </View>
         ) : (
-          <TouchableOpacity style={styles.addBtnWide} onPress={() => addQuestion()}>
-            <Text style={styles.addLabel}>+ Add Question</Text>
-          </TouchableOpacity>
+          <View style={styles.addBlock}>
+            <TouchableOpacity
+              style={styles.addQuestionBtn}
+              onPress={() => addQuestion()}
+              accessibilityRole="button"
+              accessibilityLabel="Add Question">
+              <Ionicons name="add" size={18} color={COLORS.white} />
+              <Text style={styles.addQuestionLabel}>+ Add Question</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.aiBtn}
+              onPress={() => setShowAi(true)}
+              accessibilityRole="button"
+              accessibilityLabel="AI Generator">
+              <Text style={styles.aiBtnLabel}>AI Generator</Text>
+            </TouchableOpacity>
+          </View>
         )}
 
         <TouchableOpacity onPress={() => router.push('/host/library' as Href)}>
@@ -453,33 +582,82 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: COLORS.background },
   content: { padding: SPACING[4], paddingBottom: SPACING[16], gap: SPACING[3] },
   heading: { color: COLORS.text, fontSize: 26, fontWeight: FONT_WEIGHTS.bold },
-  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING[2] },
-  primary: {
-    backgroundColor: COLORS.primary,
-    borderRadius: 12,
-    minHeight: 44,
-    paddingHorizontal: SPACING[4],
-    justifyContent: 'center',
+  subtitle: {
+    color: COLORS.inkSecondary,
+    fontSize: 14,
+    lineHeight: 20,
+    marginTop: -SPACING[1],
   },
-  primaryLabel: { color: COLORS.white, fontWeight: FONT_WEIGHTS.semibold },
-  secondary: {
+  actions: { gap: SPACING[2] },
+  mixedAiBtn: {
+    width: '100%',
+    minHeight: 48,
+    borderRadius: RADIUS.full,
     backgroundColor: COLORS.white,
-    borderRadius: 12,
     borderWidth: 1,
     borderColor: COLORS.primary,
-    minHeight: 44,
-    paddingHorizontal: SPACING[4],
+    flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'center',
-  },
-  secondaryLabel: { color: COLORS.primary, fontWeight: FONT_WEIGHTS.semibold },
-  launch: {
-    backgroundColor: COLORS.primaryDark,
-    borderRadius: 12,
-    minHeight: 44,
+    gap: SPACING[2],
     paddingHorizontal: SPACING[4],
-    justifyContent: 'center',
   },
-  label: { color: COLORS.text, fontWeight: FONT_WEIGHTS.semibold, marginTop: SPACING[2] },
+  mixedAiBtnLabel: { color: COLORS.primary, fontWeight: FONT_WEIGHTS.semibold, fontSize: 15 },
+  saveBtn: {
+    width: '100%',
+    minHeight: 48,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.primary,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING[2],
+    paddingHorizontal: SPACING[4],
+  },
+  saveBtnDisabled: { opacity: 0.7 },
+  saveBtnSaved: {
+    backgroundColor: COLORS.blush,
+    borderWidth: 1,
+    borderColor: COLORS.mutedPurple,
+  },
+  saveBtnLabel: { color: COLORS.white, fontWeight: FONT_WEIGHTS.bold, fontSize: 15 },
+  saveBtnSavedLabel: { color: COLORS.primary },
+  launchWrap: { width: '100%', gap: 4 },
+  launchBtn: {
+    width: '100%',
+    minHeight: 48,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.primary,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING[2],
+    paddingHorizontal: SPACING[4],
+  },
+  launchHint: {
+    color: COLORS.inkSecondary,
+    fontSize: 12,
+    textAlign: 'center',
+  },
+  titleCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    padding: SPACING[4],
+    ...SHADOWS.card,
+  },
+  label: { color: COLORS.text, fontWeight: FONT_WEIGHTS.semibold, marginBottom: SPACING[2] },
+  titleInput: {
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    borderRadius: RADIUS.md,
+    minHeight: 48,
+    paddingHorizontal: SPACING[4],
+    paddingVertical: SPACING[3],
+    color: COLORS.text,
+    backgroundColor: COLORS.cream,
+  },
   section: { color: COLORS.text, fontSize: 18, fontWeight: FONT_WEIGHTS.bold, marginTop: SPACING[3] },
   input: {
     borderWidth: 1,
@@ -491,13 +669,57 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     backgroundColor: COLORS.white,
   },
+  emptyCard: {
+    backgroundColor: COLORS.warningSoft,
+    borderRadius: 24,
+    paddingVertical: SPACING[5],
+    paddingHorizontal: SPACING[4],
+    alignItems: 'center',
+    gap: SPACING[2],
+  },
+  emptyEmoji: { fontSize: 32, lineHeight: 40 },
+  emptyTitle: { color: COLORS.text, fontSize: 16, fontWeight: FONT_WEIGHTS.bold },
+  emptyHelper: {
+    color: COLORS.inkSecondary,
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: 'center',
+    marginBottom: SPACING[2],
+  },
+  addFirstBtn: {
+    width: '100%',
+    minHeight: 48,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.primary,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING[1],
+    paddingHorizontal: SPACING[4],
+  },
+  addFirstLabel: { color: COLORS.white, fontWeight: FONT_WEIGHTS.bold, fontSize: 15 },
+  aiBtn: {
+    width: '100%',
+    minHeight: 44,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: SPACING[4],
+    marginTop: SPACING[1],
+  },
+  aiBtnLabel: { color: COLORS.primary, fontWeight: FONT_WEIGHTS.semibold, fontSize: 13 },
+  addBlock: { gap: SPACING[2] },
   card: {
     backgroundColor: COLORS.white,
-    borderRadius: 16,
+    borderRadius: 24,
     borderWidth: 1,
-    borderColor: COLORS.border,
+    borderColor: COLORS.cardBorder,
     padding: SPACING[4],
     gap: SPACING[3],
+    ...SHADOWS.card,
   },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   cardTitle: { color: COLORS.text, fontWeight: FONT_WEIGHTS.bold },
@@ -534,13 +756,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  addBtnWide: {
+  addQuestionBtn: {
+    width: '100%',
     minHeight: 48,
-    borderRadius: 12,
-    backgroundColor: COLORS.blush,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.primary,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: SPACING[1],
+    paddingHorizontal: SPACING[4],
   },
+  addQuestionLabel: { color: COLORS.white, fontWeight: FONT_WEIGHTS.bold, fontSize: 15 },
   addLabel: { color: COLORS.primary, fontWeight: FONT_WEIGHTS.semibold },
   back: {
     marginTop: SPACING[4],

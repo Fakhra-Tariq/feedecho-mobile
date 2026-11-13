@@ -2,7 +2,7 @@ import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as FileSystem from 'expo-file-system/legacy';
 
 const TARGET_BYTES = 1024 * 1024;
-const MAX_EDGE = 1600;
+const MAX_EDGE = 1280;
 
 const DOCUMENT_MIME_BY_EXT: Record<string, string> = {
   pdf: 'application/pdf',
@@ -28,11 +28,6 @@ export function guessDocumentMime(fileName?: string, mimeType?: string) {
     .pop()
     ?.toLowerCase();
   return (ext && DOCUMENT_MIME_BY_EXT[ext]) || type || 'application/octet-stream';
-}
-
-function fileExtension(fileName?: string) {
-  const match = String(fileName || '').match(/(\.[A-Za-z0-9]+)$/);
-  return match ? match[1].toLowerCase() : '';
 }
 
 function fileSizeOf(info: { exists: boolean; size?: number }, fallback = 0) {
@@ -83,37 +78,27 @@ function blobToDataUrl(blob: Blob, mimeType: string): Promise<string> {
 }
 
 /**
- * Copy a picker URI into app cache with an ASCII name so FileSystem can read
- * files like "20260927182115908 (1).PDF" or content:// URIs on Android.
- * Original display name is kept on fileName.
+ * Keep the picker URI. DocumentPicker already copies into the app cache when
+ * copyToCacheDirectory is true. An extra copyAsync on Android content:// URIs
+ * is rejected in Expo SDK 58 ("Call to function ... has been rejected") and
+ * Expo Go surfaces that console.error as a red toast.
  */
 export async function cacheLocalFileForUpload(input: PreparedChatFile): Promise<PreparedChatFile> {
   const fileName = input.fileName || 'file';
   const mimeType = guessDocumentMime(fileName, input.mimeType);
-  const destDir = `${FileSystem.cacheDirectory}team-chat-uploads/`;
+  const uri = String(input.uri || '');
+  if (!uri) return { ...input, fileName, mimeType };
   try {
-    await FileSystem.makeDirectoryAsync(destDir, { intermediates: true });
-  } catch {
-    // directory may already exist
-  }
-  const dest = `${destDir}${Date.now()}-${Math.random().toString(36).slice(2, 8)}${fileExtension(fileName)}`;
-  try {
-    await FileSystem.copyAsync({ from: input.uri, to: dest });
-    const info = await FileSystem.getInfoAsync(dest);
-    if (!info.exists) throw new Error('Failed to cache file');
+    const info = await FileSystem.getInfoAsync(uri);
     return {
-      uri: dest,
+      ...input,
+      uri,
       fileName,
       mimeType,
       size: fileSizeOf(info, input.size || 0),
     };
-  } catch (error) {
-    console.error('Team chat: cache copy failed', {
-      message: error instanceof Error ? error.message : String(error),
-      uri: input.uri,
-      fileName,
-    });
-    return { ...input, fileName, mimeType };
+  } catch {
+    return { ...input, uri, fileName, mimeType };
   }
 }
 
@@ -124,47 +109,59 @@ export type PreparedChatFile = {
   size?: number;
 };
 
-/** Same rules as Web prepareChatImage: skip GIFs; JPEG ~0.8; max 1600px; target < 1MB. */
+/**
+ * Compress for RN upload (data URL in the same POST body as Web).
+ * GIFs are left as-is. Everything else is JPEG, long edge 1280, quality ~0.7,
+ * target under 1MB so a 12MP camera capture cannot OOM the JS heap.
+ */
 export async function prepareChatImage(
   input: PreparedChatFile & { width?: number; height?: number }
 ): Promise<PreparedChatFile> {
   const name = input.fileName || 'photo.jpg';
   const type = String(input.mimeType || '').toLowerCase();
   const isGif = type === 'image/gif' || /\.gif$/i.test(name);
-  if (isGif) return input;
-
-  const info = await FileSystem.getInfoAsync(input.uri);
-  const size = fileSizeOf(info, input.size || 0);
-  // Same as Web: skip GIFs (above) and already-small images without recompressing.
-  if (size > 0 && size <= TARGET_BYTES) {
-    return { ...input, size };
-  }
+  const cached = await cacheLocalFileForUpload(input);
+  if (isGif) return cached;
 
   let width = input.width || 0;
   let height = input.height || 0;
-  if (!width || !height) {
-    const probe = await manipulateAsync(input.uri, [], { compress: 1, format: SaveFormat.JPEG });
-    width = probe.width;
-    height = probe.height;
-  }
+  const sourceUri = cached.uri;
+  const longestKnown = Math.max(width, height);
+  const firstActions =
+    longestKnown > MAX_EDGE
+      ? [
+          {
+            resize: {
+              width: Math.max(1, Math.round(width * (MAX_EDGE / longestKnown))),
+              height: Math.max(1, Math.round(height * (MAX_EDGE / longestKnown))),
+            },
+          },
+        ]
+      : longestKnown > 0
+        ? []
+        : [{ resize: { width: MAX_EDGE } }];
 
-  const longest = Math.max(width, height);
-  const actions: { resize: { width: number; height: number } }[] = [];
-  if (longest > MAX_EDGE) {
-    const ratio = MAX_EDGE / longest;
-    actions.push({
-      resize: {
-        width: Math.max(1, Math.round(width * ratio)),
-        height: Math.max(1, Math.round(height * ratio)),
-      },
-    });
-  }
-
-  let result = await manipulateAsync(input.uri, actions, {
-    compress: 0.8,
+  let result = await manipulateAsync(sourceUri, firstActions, {
+    compress: 0.7,
     format: SaveFormat.JPEG,
   });
-  let quality = 0.8;
+  if (Math.max(result.width || 0, result.height || 0) > MAX_EDGE) {
+    const long = Math.max(result.width, result.height);
+    const ratio = MAX_EDGE / long;
+    result = await manipulateAsync(
+      result.uri,
+      [
+        {
+          resize: {
+            width: Math.max(1, Math.round(result.width * ratio)),
+            height: Math.max(1, Math.round(result.height * ratio)),
+          },
+        },
+      ],
+      { compress: 0.7, format: SaveFormat.JPEG }
+    );
+  }
+  let quality = 0.7;
   let resultInfo = await FileSystem.getInfoAsync(result.uri);
   let resultSize = fileSizeOf(resultInfo);
 
@@ -207,27 +204,43 @@ export async function prepareChatImage(
   };
 }
 
-export async function fileToDataUrl(uri: string, mimeType: string, onProgress?: (ratio: number) => void) {
+export async function fileToDataUrl(
+  uri: string,
+  mimeType: string,
+  onProgress?: (ratio: number) => void,
+  options?: { maxBytes?: number; tooLargeMessage?: string }
+) {
   onProgress?.(0.05);
   const mime = mimeType || 'application/octet-stream';
-  const encoding = FileSystem.EncodingType?.Base64 ?? 'base64';
+  const maxBytes = options?.maxBytes;
   try {
-    const base64 = await FileSystem.readAsStringAsync(uri, { encoding });
-    if (!base64) throw new Error('Failed to read file');
-    onProgress?.(1);
-    return `data:${mime};base64,${base64}`;
-  } catch (fsError) {
-    console.error('Team chat: FileSystem read failed, trying XHR blob', {
-      message: fsError instanceof Error ? fsError.message : String(fsError),
-      uri,
-      mimeType: mime,
-    });
+    const info = await FileSystem.getInfoAsync(uri);
+    const size = fileSizeOf(info);
+    if (maxBytes != null && size > maxBytes) {
+      throw new Error(options?.tooLargeMessage || 'File too large. Maximum size is 100MB for chat.');
+    }
+  } catch (error) {
+    if (error instanceof Error && /too large/i.test(error.message)) throw error;
+  }
+
+  try {
+    onProgress?.(0.2);
     const blob = await xhrBlob(uri);
     if (!blob || (typeof blob.size === 'number' && blob.size === 0)) {
       throw new Error('Failed to read file');
     }
+    if (maxBytes != null && blob.size > maxBytes) {
+      throw new Error(options?.tooLargeMessage || 'File too large. Maximum size is 100MB for chat.');
+    }
     const dataUrl = await blobToDataUrl(blob, mime);
     onProgress?.(1);
     return dataUrl;
+  } catch (blobError) {
+    if (blobError instanceof Error && /too large/i.test(blobError.message)) throw blobError;
+    const encoding = FileSystem.EncodingType?.Base64 ?? 'base64';
+    const base64 = await FileSystem.readAsStringAsync(uri, { encoding });
+    if (!base64) throw new Error('Failed to read file');
+    onProgress?.(1);
+    return `data:${mime};base64,${base64}`;
   }
 }

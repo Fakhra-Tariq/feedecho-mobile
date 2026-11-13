@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "mobile",
+    "name": "FeedEcho",
     "slug": "mobile",
     "owner": "feedecho",
     "version": "1.0.0",
@@ -16,6 +16,8 @@
       "barStyle": "dark-content"
     },
     "android": {
+      "package": "com.feedecho",
+      "versionCode": 3,
       "adaptiveIcon": {
         "backgroundColor": "#F4F1EC",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -23,7 +25,14 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "softwareKeyboardLayoutMode": "pan"
+      "softwareKeyboardLayoutMode": "resize",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.READ_MEDIA_IMAGES"
+      ]
     },
     "web": {
       "output": "static",
@@ -34,8 +43,7 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow FeedEcho to access photos so you can share images in team chat.",
-          "cameraPermission": "Allow FeedEcho to use the camera so you can share photos in team chat."
+          "photosPermission": "Allow FeedEcho to access photos so you can share images in team chat."
         }
       ],
       "expo-document-picker",
@@ -50,11 +58,33 @@
       "expo-font",
       "expo-image",
       "expo-status-bar",
-      "expo-web-browser"
+      "expo-web-browser",
+      "expo-sharing",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow FeedEcho to save images to your photo library.",
+          "savePhotosPermission": "Allow FeedEcho to save images to your photo library.",
+          "isAccessMediaLocationEnabled": false,
+          "granularPermissions": [
+            "photo"
+          ]
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "0190335b-862e-4658-9ea9-211bcd49199b"
+      }
     }
   }
 }

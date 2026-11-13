@@ -1,9 +1,11 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { LinearGradient } from 'expo-linear-gradient';
 import { router, type Href } from 'expo-router';
 import { useCallback, useState } from 'react';
 import {
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,9 +20,8 @@ import { showAlert } from '@/components/feedback';
 import { cleanErrorMessage } from '@/lib/activeActivity';
 import { CreateSessionModal } from '@/components/CreateSessionModal';
 import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING } from '@/constants/theme';
-import { useHostSessions } from '@/context/HostSessionContext';
+import { useHostSessions, useSessionActivityLabel } from '@/context/HostSessionContext';
 import { getQuizEditorTypeParam } from '@/lib/aiGeneratedQuiz';
-import { getSessionActivityLabel } from '@/lib/sessionActivityLabel';
 import { TAB_BAR_CONTENT_HEIGHT } from '@/lib/tabBarSafeArea';
 
 const HOW_IT_WORKS_STEPS = [
@@ -65,12 +66,15 @@ const QUESTION_TYPES = [
 const HERO_PLUM = '#6D415F';
 const HERO_BROWN = '#3A2E2A';
 const CARD_BORDER = 'rgba(109, 65, 95, 0.15)';
+/** Opaque composites of Web `.surface-card` stops on white (index.css). */
+const CARD_GRAD = ['#FFFFFF', '#F8F6F7', '#EDE8EC'] as const;
 const BANNER_BORDER = 'rgba(109, 65, 95, 0.2)';
 const BANNER_BG = '#F1E5EB';
 
 export default function QuizHubScreen() {
   const insets = useSafeAreaInsets();
-  const { activeSession, createSession, quizzes } = useHostSessions();
+  const { activeSession, createSession } = useHostSessions();
+  const activityLabel = useSessionActivityLabel();
 
   const [showAi, setShowAi] = useState(false);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
@@ -86,7 +90,6 @@ export default function QuizHubScreen() {
   const sessionCode = String(activeSession?.sessionCode || '')
     .trim()
     .toUpperCase();
-  const activityLabel = getSessionActivityLabel(activeSession?.currentActivity, quizzes);
 
   const onCreateSession = useCallback(async () => {
     if (!sessionName.trim()) {
@@ -192,48 +195,57 @@ export default function QuizHubScreen() {
           )}
         </View>
 
-        {/* Hero — Web PageHeaderCard colors */}
-        <View style={styles.hero}>
-          <View style={styles.heroBrownWash} pointerEvents="none" />
-          <View style={styles.heroTitleRow}>
-            <Text style={styles.heroTitle}>Create a New Quiz</Text>
-            <Pressable
-              onPress={() => setShowHowItWorks(true)}
-              hitSlop={8}
-              style={({ pressed }) => [styles.howItWorks, pressed && styles.pressed]}
-              accessibilityRole="button"
-              accessibilityLabel="How it works">
-              <Ionicons name="help-circle-outline" size={16} color="rgba(255,255,255,0.9)" />
-              <Text style={styles.howItWorksText}>How it works</Text>
-              <Ionicons name="chevron-forward" size={14} color="rgba(255,255,255,0.9)" />
-            </Pressable>
-          </View>
+        {/* Hero — Web PageHeaderCard `from-[#6D415F] to-[#3A2E2A]` */}
+        <LinearGradient
+          colors={[HERO_PLUM, HERO_BROWN]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.hero}>
+          <Text style={styles.heroTitle}>Create a New Quiz</Text>
+          <Pressable
+            onPress={() => setShowHowItWorks(true)}
+            hitSlop={8}
+            style={({ pressed }) => [styles.howItWorks, pressed && styles.pressed]}
+            accessibilityRole="button"
+            accessibilityLabel="How it works">
+            <Ionicons name="help-circle-outline" size={16} color="rgba(255,255,255,0.9)" />
+            <Text style={styles.howItWorksText}>How it works</Text>
+            <Ionicons name="chevron-forward" size={14} color="rgba(255,255,255,0.9)" />
+          </Pressable>
           <Text style={styles.heroSubtitle}>{"Choose how you'd like to build your next quiz"}</Text>
-        </View>
+        </LinearGradient>
 
         {/* 2×2 option grid */}
         <View style={styles.grid}>
           {[0, 1].map((row) => (
             <View key={row} style={styles.gridRow}>
               {LAUNCH_OPTIONS.slice(row * 2, row * 2 + 2).map((option) => (
-                <Pressable
-                  key={option.key}
-                  onPress={() => onSelectOption(option.key)}
-                  style={({ pressed }) => [styles.optionCard, pressed && styles.optionPressed]}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${option.title}, Create`}>
-                  <View style={styles.optionIcon}>
-                    <Ionicons name={option.icon} size={20} color={COLORS.white} />
-                  </View>
-                  <Text style={styles.optionTitle}>{option.title}</Text>
-                  <Text style={styles.optionDesc}>{option.description}</Text>
-                  <View style={styles.optionCtaWrap}>
-                    <View style={styles.optionCta}>
-                      <Text style={styles.optionCtaLabel}>Create</Text>
-                      <Ionicons name="arrow-forward" size={14} color={COLORS.white} />
-                    </View>
-                  </View>
-                </Pressable>
+                <View key={option.key} style={styles.optionCardWrap}>
+                  <Pressable
+                    onPress={() => onSelectOption(option.key)}
+                    style={({ pressed }) => [styles.optionCard, pressed && styles.optionPressed]}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${option.title}, Create`}>
+                    <LinearGradient
+                      colors={[...CARD_GRAD]}
+                      locations={[0, 0.38, 1]}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 0.42, y: 1 }}
+                      style={styles.optionCardFill}>
+                      <View style={styles.optionIcon}>
+                        <Ionicons name={option.icon} size={20} color={COLORS.white} />
+                      </View>
+                      <Text style={styles.optionTitle}>{option.title}</Text>
+                      <Text style={styles.optionDesc}>{option.description}</Text>
+                      <View style={styles.optionCtaWrap}>
+                        <View style={styles.optionCta}>
+                          <Text style={styles.optionCtaLabel}>Create</Text>
+                          <Ionicons name="arrow-forward" size={14} color={COLORS.white} />
+                        </View>
+                      </View>
+                    </LinearGradient>
+                  </Pressable>
+                </View>
               ))}
             </View>
           ))}
@@ -451,26 +463,12 @@ const styles = StyleSheet.create({
     textDecorationLine: 'underline',
   },
   hero: {
-    backgroundColor: HERO_PLUM,
     borderRadius: 24,
     borderWidth: 1,
     borderColor: 'rgba(109, 65, 95, 0.3)',
     padding: SPACING[5],
     overflow: 'hidden',
     ...SHADOWS.raised,
-  },
-  heroBrownWash: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: HERO_BROWN,
-    opacity: 0.35,
-    left: '35%',
-    top: '25%',
-  },
-  heroTitleRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    gap: SPACING[3],
   },
   heroTitle: {
     color: COLORS.white,
@@ -503,16 +501,41 @@ const styles = StyleSheet.create({
     alignItems: 'stretch',
     gap: 10,
   },
+  optionCardWrap: {
+    flex: 1,
+    minWidth: 0,
+    borderRadius: 28,
+    backgroundColor: '#FFFFFF',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.05,
+        shadowRadius: 2,
+      },
+      android: { elevation: 2 },
+      default: {
+        shadowColor: '#000000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.05,
+        shadowRadius: 2,
+      },
+    }),
+  },
   optionCard: {
     flex: 1,
     minWidth: 0,
-    flexDirection: 'column',
-    borderRadius: 24,
+    borderRadius: 28,
     borderWidth: 1,
     borderColor: CARD_BORDER,
-    padding: 12,
-    backgroundColor: '#F8F3F6',
-    ...SHADOWS.card,
+    overflow: 'hidden',
+  },
+  optionCardFill: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'column',
+    paddingHorizontal: 16,
+    paddingVertical: 20,
   },
   optionPressed: {
     opacity: 0.88,
@@ -535,13 +558,13 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   optionDesc: {
-    color: COLORS.darkTextSecondary,
+    color: COLORS.mutedText,
     fontSize: 12,
     lineHeight: 16,
     flex: 1,
   },
   optionCtaWrap: {
-    marginTop: 12,
+    marginTop: 20,
   },
   optionCta: {
     flexDirection: 'row',

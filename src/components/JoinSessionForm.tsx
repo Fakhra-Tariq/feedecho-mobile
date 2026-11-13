@@ -1,10 +1,10 @@
-import { Ionicons } from '@expo/vector-icons';
 import { router, type Href } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { AuthDivider, GoogleSignInButton } from '@/components/AuthExtras';
 import { KeyboardSafeScreen } from '@/components/KeyboardSafeScreen';
+import { SpaceRaceTeamSelect } from '@/components/SpaceRaceTeamSelect';
 import { AppButton, AppCard } from '@/components/ui';
 import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING, TYPE } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
@@ -13,7 +13,12 @@ import {
   stashActivityEntrySource,
   type ActivityEntrySource,
 } from '@/lib/audienceHomeNavigation';
+import { markGuestSessionActive } from '@/lib/guestSession';
 import { navigateToJoinedActivity } from '@/lib/joinSessionNavigation';
+import {
+  GUEST_QUIZ_ALREADY_ATTEMPTED,
+  guestJoinBlockReason,
+} from '@/lib/studentParticipation';
 
 type Props = {
   showBack?: boolean;
@@ -22,13 +27,20 @@ type Props = {
 };
 
 export function JoinSessionForm({ showBack = false, entrySource }: Props) {
-  const { joinSession, audienceSignIn, audienceSignInWithGoogle, profile } = useAuth();
+  const { joinSession, audienceSignIn, audienceSignInWithGoogle, profile, isHost } = useAuth();
   const [, , promptAsync] = useGoogleIdTokenRequest();
+  const showAuthExtras = entrySource === 'public' && !isHost;
 
   const [name, setName] = useState(profile?.name || '');
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  const [raceData, setRaceData] = useState<any>(null);
+  const [showTeamSelection, setShowTeamSelection] = useState(false);
+  const [pendingJoin, setPendingJoin] = useState<{ trimmedName: string; trimmedCode: string } | null>(
+    null
+  );
 
   const [showEmailLogin, setShowEmailLogin] = useState(false);
   const [loginEmail, setLoginEmail] = useState('');
@@ -38,21 +50,87 @@ export function JoinSessionForm({ showBack = false, entrySource }: Props) {
   const [googleLoading, setGoogleLoading] = useState(false);
   const [authSubmitting, setAuthSubmitting] = useState(false);
 
-  const onSubmit = async () => {
-    if (submitting) return;
+  const isGuestJoin = entrySource === 'public' && !isHost && !profile?.uid;
+
+  const runJoin = async (trimmedName: string, trimmedCode: string, teamId: number | null = null) => {
     setError('');
     setSubmitting(true);
-    await stashActivityEntrySource(entrySource);
-    const result = await joinSession({ name, code });
-    setSubmitting(false);
-    if (result.success) {
-      const navigated = await navigateToJoinedActivity(result, entrySource);
-      if (!navigated) {
-        setError('Unsupported or incomplete session activity. Please try again.');
+    try {
+      if (isGuestJoin && teamId == null) {
+        try {
+          const blocked = await guestJoinBlockReason(trimmedName, trimmedCode);
+          if (blocked) {
+            setError(blocked);
+            return;
+          }
+        } catch (checkErr) {
+          console.warn('[guest submit check] network error, allowing join', checkErr);
+        }
       }
+      // Marker must exist before isStudent flips so guards never treat this
+      // code-join as a logged-in student landing on Home/Progress/Study/Profile.
+      if (entrySource === 'public') markGuestSessionActive();
+      await stashActivityEntrySource(entrySource);
+      const result = await joinSession({ name: trimmedName, code: trimmedCode, teamId });
+      // TEMP DEBUG — remove after guest join is confirmed
+      console.log('[TEMP DEBUG] join success', {
+        code: trimmedCode,
+        activityType: result.activityType,
+        success: result.success,
+        needsTeamSelection: result.needsTeamSelection,
+        error: result.error || null,
+        entrySource,
+        quizId: result.quizId || null,
+        raceId: result.raceId || null,
+      });
+
+      if (result.needsTeamSelection) {
+        setRaceData(result.raceData || { id: result.raceId });
+        setPendingJoin({ trimmedName, trimmedCode });
+        setShowTeamSelection(true);
+        return;
+      }
+
+      if (result.success) {
+        const navigated = await navigateToJoinedActivity(result, entrySource);
+        if (!navigated) {
+          setError('Unsupported or incomplete session activity. Please try again.');
+        }
+        return;
+      }
+
+      const joinError = result.error || 'Failed to join session. Please try again.';
+      if (isGuestJoin && /already completed this quiz/i.test(joinError)) {
+        setError(GUEST_QUIZ_ALREADY_ATTEMPTED);
+        return;
+      }
+      setError(joinError);
+    } catch {
+      setError('Failed to join session. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const onSubmit = async () => {
+    if (submitting) return;
+    const trimmedName = name.trim();
+    const trimmedCode = code.trim().toUpperCase();
+    if (!trimmedName || !trimmedCode) return;
+    if (trimmedCode.length !== 6) {
+      setError('Session code must be exactly 6 characters');
       return;
     }
-    setError(result.error || 'Failed to join session. Please try again.');
+    await runJoin(trimmedName, trimmedCode);
+  };
+
+  const onTeamContinue = async (teamId: number) => {
+    if (!pendingJoin) {
+      setError('Please select a team');
+      return;
+    }
+    setShowTeamSelection(false);
+    await runJoin(pendingJoin.trimmedName, pendingJoin.trimmedCode, teamId);
   };
 
   const onGoogleLogin = async () => {
@@ -64,6 +142,7 @@ export function JoinSessionForm({ showBack = false, entrySource }: Props) {
     setGoogleLoading(false);
     setAuthSubmitting(false);
     if (result.success) {
+      console.log('[TEMP DEBUG] JoinSessionForm Google login replace', { to: '/audience' });
       router.replace('/audience' as Href);
       return;
     }
@@ -87,120 +166,150 @@ export function JoinSessionForm({ showBack = false, entrySource }: Props) {
     setAuthLoading(false);
     setAuthSubmitting(false);
     if (result.success) {
+      console.log('[TEMP DEBUG] JoinSessionForm email login replace', { to: '/audience' });
       router.replace('/audience' as Href);
       return;
     }
     setAuthError(result.error || 'Login failed. Please try again.');
   };
 
+  if (showTeamSelection) {
+    return (
+      <SpaceRaceTeamSelect
+        raceData={raceData}
+        isLoading={submitting}
+        error={error}
+        onContinue={onTeamContinue}
+        onBack={() => {
+          setShowTeamSelection(false);
+          setRaceData(null);
+          setPendingJoin(null);
+          setError('');
+        }}
+      />
+    );
+  }
+
   return (
     <KeyboardSafeScreen style={styles.screen} contentContainerStyle={styles.scroll}>
-        <AppCard style={styles.card}>
-          <View style={styles.iconWrap}>
-            <Ionicons name="keypad-outline" size={28} color={COLORS.primary} />
+      <AppCard style={styles.card}>
+        <Text style={styles.title}>Join Session</Text>
+        <Text style={styles.subtitle}>
+          Enter your name and the session code shared by your host.
+        </Text>
+        <Text style={styles.label}>Your Name</Text>
+        <TextInput
+          value={name}
+          onChangeText={(value) => {
+            setName(value);
+            if (error) setError('');
+          }}
+          autoCorrect={false}
+          placeholder="e.g. Ali"
+          placeholderTextColor={COLORS.darkTextSecondary}
+          editable={!submitting}
+          style={styles.input}
+        />
+        <Text style={styles.label}>Session Code</Text>
+        <TextInput
+          value={code}
+          onChangeText={(value) => {
+            setCode(value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6));
+            if (error) setError('');
+          }}
+          autoCapitalize="characters"
+          autoCorrect={false}
+          maxLength={6}
+          placeholder="e.g. AB12CD"
+          placeholderTextColor={COLORS.darkTextSecondary}
+          editable={!submitting}
+          style={styles.input}
+        />
+        {error ? (
+          <View style={styles.errorBox}>
+            <Text style={styles.error}>{error}</Text>
           </View>
-          <Text style={styles.title}>Join a Session</Text>
-          <Text style={styles.subtitle}>
-            Enter your name and the session code shared by your host.
-          </Text>
-          <Text style={styles.label}>Name</Text>
-          <TextInput
-            value={name}
-            onChangeText={setName}
-            autoCorrect={false}
-            placeholder="Your name"
-            placeholderTextColor={COLORS.darkTextSecondary}
-            style={styles.input}
-          />
-          <Text style={styles.label}>Session code</Text>
-          <TextInput
-            value={code}
-            onChangeText={(value) =>
-              setCode(value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))
-            }
-            autoCapitalize="characters"
-            autoCorrect={false}
-            maxLength={6}
-            placeholder="6-character code"
-            placeholderTextColor={COLORS.darkTextSecondary}
-            style={styles.input}
-          />
-          {error ? <Text style={styles.error}>{error}</Text> : null}
-          <AppButton
-            label={submitting ? 'Joining...' : 'Join Session'}
-            icon="arrow-forward-outline"
-            loading={submitting}
-            onPress={onSubmit}
-            disabled={submitting}
-          />
+        ) : null}
+        <AppButton
+          label={submitting ? 'Joining...' : 'Join Session'}
+          loading={submitting}
+          onPress={onSubmit}
+          disabled={submitting}
+        />
 
-          <AuthDivider label="already have an account?" />
+        {showAuthExtras ? (
+          <>
+            <AuthDivider label="already have an account?" />
 
-          {authError ? <Text style={styles.error}>{authError}</Text> : null}
+            {authError ? (
+              <View style={styles.errorBox}>
+                <Text style={styles.error}>{authError}</Text>
+              </View>
+            ) : null}
 
-          <GoogleSignInButton
-            onPress={onGoogleLogin}
-            loading={googleLoading}
-            disabled={googleLoading || authSubmitting}
-          />
+            <GoogleSignInButton
+              onPress={onGoogleLogin}
+              loading={googleLoading}
+              disabled={googleLoading || authSubmitting}
+            />
 
-          {!showEmailLogin ? (
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => setShowEmailLogin(true)}
-              style={styles.linkBtn}>
-              <Text style={styles.linkText}>Sign in with email instead</Text>
-            </Pressable>
-          ) : (
-            <View style={styles.emailBlock}>
-              <Text style={styles.label}>Email</Text>
-              <TextInput
-                value={loginEmail}
-                onChangeText={setLoginEmail}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="email-address"
-                textContentType="emailAddress"
-                placeholder="you@school.edu"
-                placeholderTextColor={COLORS.darkTextSecondary}
-                style={styles.input}
-              />
-              <Text style={styles.label}>Password</Text>
-              <TextInput
-                value={loginPassword}
-                onChangeText={setLoginPassword}
-                secureTextEntry
-                textContentType="password"
-                placeholder="Password"
-                placeholderTextColor={COLORS.darkTextSecondary}
-                style={styles.input}
-              />
-              <AppButton
-                label={authLoading ? 'Signing in...' : 'Sign In'}
-                loading={authLoading}
-                onPress={onEmailLogin}
-                disabled={authLoading || authSubmitting}
-              />
+            {!showEmailLogin ? (
               <Pressable
-                accessibilityRole="link"
-                onPress={() => router.push('/audience-forgot' as Href)}
-                style={styles.forgotRow}>
-                <Text style={styles.linkText}>Forgot password?</Text>
+                accessibilityRole="button"
+                onPress={() => setShowEmailLogin(true)}
+                style={styles.linkBtn}>
+                <Text style={styles.linkText}>Sign in with email instead</Text>
               </Pressable>
-            </View>
-          )}
+            ) : (
+              <View style={styles.emailBlock}>
+                <Text style={styles.label}>Email</Text>
+                <TextInput
+                  value={loginEmail}
+                  onChangeText={setLoginEmail}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="email-address"
+                  textContentType="emailAddress"
+                  placeholderTextColor={COLORS.darkTextSecondary}
+                  style={styles.input}
+                />
+                <Text style={styles.label}>Password</Text>
+                <TextInput
+                  value={loginPassword}
+                  onChangeText={setLoginPassword}
+                  secureTextEntry
+                  textContentType="password"
+                  placeholderTextColor={COLORS.darkTextSecondary}
+                  style={styles.input}
+                />
+                <AppButton
+                  label={authLoading ? 'Signing in...' : 'Sign In'}
+                  loading={authLoading}
+                  onPress={onEmailLogin}
+                  disabled={authLoading || authSubmitting}
+                />
+                <Pressable
+                  accessibilityRole="link"
+                  onPress={() => router.push('/audience-forgot' as Href)}
+                  style={styles.forgotRow}>
+                  <Text style={styles.linkText}>Forgot password?</Text>
+                </Pressable>
+              </View>
+            )}
 
-          <Pressable
-            accessibilityRole="link"
-            onPress={() => router.push('/audience-signup' as Href)}
-            style={styles.signupRow}>
-            <Text style={styles.linkText}>No account? Sign up</Text>
-          </Pressable>
+            <Pressable
+              accessibilityRole="link"
+              onPress={() => router.push('/audience-signup' as Href)}
+              style={styles.signupRow}>
+              <Text style={styles.linkText}>No account? Sign up</Text>
+            </Pressable>
+          </>
+        ) : null}
 
-          {showBack ? (
-            <AppButton label="Back" variant="ghost" onPress={() => router.back()} style={styles.back} />
-          ) : null}
-        </AppCard>
+        {showBack ? (
+          <AppButton label="Back" variant="ghost" onPress={() => router.back()} style={styles.back} />
+        ) : null}
+      </AppCard>
     </KeyboardSafeScreen>
   );
 }
@@ -213,32 +322,41 @@ const styles = StyleSheet.create({
   scroll: {
     flexGrow: 1,
     justifyContent: 'center',
-    padding: SPACING[6],
+    paddingHorizontal: SPACING[4],
+    paddingVertical: SPACING[10],
   },
   card: { ...SHADOWS.raised },
-  iconWrap: {
-    width: 56,
-    height: 56,
-    borderRadius: RADIUS.lg,
-    backgroundColor: COLORS.blush,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: SPACING[3],
+  title: { ...TYPE.title, fontSize: 24, marginBottom: SPACING[2] },
+  subtitle: {
+    ...TYPE.body,
+    color: COLORS.darkTextSecondary,
+    marginBottom: SPACING[6],
   },
-  title: { ...TYPE.title },
-  subtitle: { ...TYPE.subtitle, marginTop: SPACING[2], marginBottom: SPACING[5] },
-  label: { ...TYPE.label, marginBottom: SPACING[2] },
+  label: {
+    fontSize: 14,
+    fontWeight: FONT_WEIGHTS.medium,
+    color: COLORS.darkTextSecondary,
+    marginBottom: SPACING[2],
+  },
   input: {
     borderWidth: 1,
-    borderColor: COLORS.divider,
+    borderColor: '#D1D5DB',
     borderRadius: RADIUS.md,
-    paddingHorizontal: SPACING[4],
-    minHeight: 48,
+    paddingHorizontal: SPACING[3],
+    minHeight: 44,
     color: COLORS.text,
     marginBottom: SPACING[4],
-    backgroundColor: COLORS.surfaceMuted,
+    backgroundColor: COLORS.white,
   },
-  error: { color: COLORS.dangerText, marginBottom: SPACING[3], fontSize: 14 },
+  errorBox: {
+    backgroundColor: COLORS.dangerSoft,
+    borderWidth: 1,
+    borderColor: COLORS.dangerBorder,
+    borderRadius: RADIUS.md,
+    padding: SPACING[3],
+    marginBottom: SPACING[4],
+  },
+  error: { color: COLORS.dangerText, fontSize: 14 },
   emailBlock: { marginTop: SPACING[4] },
   linkBtn: {
     minHeight: 44,

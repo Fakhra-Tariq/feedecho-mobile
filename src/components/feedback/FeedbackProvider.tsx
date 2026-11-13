@@ -26,6 +26,8 @@ export type ToastOptions = {
   type?: 'success' | 'info';
   title: string;
   message?: string;
+  /** Optional Ionicons name; defaults by type. */
+  icon?: keyof typeof Ionicons.glyphMap;
 };
 
 export type AlertButton = {
@@ -193,8 +195,11 @@ export function FeedbackProvider({ children }: PropsWithChildren) {
                 toast.type === 'info' ? styles.toastIconInfo : styles.toastIconSuccess,
               ]}>
               <Ionicons
-                name={toast.type === 'info' ? 'information' : 'checkmark'}
-                size={toast.type === 'info' ? 12 : 18}
+                name={
+                  toast.icon ||
+                  (toast.type === 'info' ? 'information' : 'checkmark')
+                }
+                size={toast.type === 'info' && !toast.icon ? 12 : 18}
                 color={COLORS.white}
               />
             </View>
@@ -378,7 +383,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  toastIconSuccess: { backgroundColor: '#22C55E' },
+  toastIconSuccess: { backgroundColor: COLORS.plum },
   toastIconInfo: {
     width: 20,
     height: 20,

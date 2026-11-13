@@ -4,17 +4,20 @@ import { router, useLocalSearchParams, type Href } from 'expo-router';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AudienceActivityHeader } from '@/components/Audience/AudienceActivityHeader';
 import { GuestProgressLoginBanner } from '@/components/Audience/GuestProgressLoginBanner';
+import { QuizQuestionNavButtons } from '@/components/Audience/QuizQuestionNavButtons';
 import {
   SPACE_RACE_FAB_BOTTOM_PAD,
   SpaceRaceTeamChatFab,
@@ -24,29 +27,46 @@ import {
   KEYBOARD_SCROLL_PROPS,
   KeyboardSafeScreen,
 } from '@/components/KeyboardSafeScreen';
-import { showAlert } from '@/components/feedback';
+import { showAlert, showToast } from '@/components/feedback';
 import { COLORS, FONT_WEIGHTS, RADIUS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { normalizeQuizTypeLabel } from '@/lib/aiGeneratedQuiz';
+import {
+  getPerformanceComment,
+  spaceRaceResultStats,
+  type SpaceRaceFinalScoreApi,
+} from '@/lib/spaceRaceResultStats';
 import { cleanErrorMessage } from '@/lib/activeActivity';
 import {
   appendActivityEntrySource,
   useLeaveActivity,
 } from '@/lib/audienceHomeNavigation';
-import { getFinalScore, getPublicSpaceRaceById, setTeamSelection, submitRaceAnswer } from '@/lib/hostSpaceRaces';
+import {
+  getFinalScore,
+  getPublicSpaceRaceById,
+  getTeamSelection,
+  setTeamSelection,
+  submitRaceAnswer,
+} from '@/lib/hostSpaceRaces';
 import {
   bootstrapSpaceRaceQuiz,
   normalizeQuestionList,
+  readSpaceRaceQuizOptions,
   teamQuizCacheKey,
 } from '@/lib/spaceRaceAudienceQuiz';
 import { loadSpaceRaceParticipant, saveSpaceRaceParticipant } from '@/lib/spaceRaceSession';
 import {
+  findLiveQuestionNodes,
   getRaceStatus,
   isSubmittedLockNode,
+  optionMatchesSelection,
   spaceRaceQuestionId,
+  spaceRaceLiveQuestionKeys,
   spaceRaceQuestionIdAliases,
+  teamNodeAnswer,
   teamScoreFromNode,
 } from '@/lib/spaceRaceTeams';
+import { nodesFromSnapshot, useLiveTeamSelectionMap } from '@/lib/useLiveTeamSelection';
 import { useRtdbValue } from '@/lib/useRtdb';
 
 function isLoggedInAudience(
@@ -71,6 +91,22 @@ function pickQuestionLockNode(nodes: any[]) {
   return nodes.find((node) => node && typeof node === 'object') || null;
 }
 
+/** Prefer a submitted node over a stale unsubmitted snapshot of the same question. */
+function mergeTeamSelectionMaps(hooked: Record<string, any>, fromTree: Record<string, any>) {
+  const out: Record<string, any> = { ...hooked };
+  Object.entries(fromTree).forEach(([key, node]) => {
+    const existing = out[key];
+    if (isSubmittedLockNode(existing) && !isSubmittedLockNode(node)) return;
+    out[key] = node;
+  });
+  return out;
+}
+
+function teammateDisplayName(participant: any, profile: any) {
+  const name = String(participant?.name || profile?.name || '').trim();
+  return name || 'A teammate';
+}
+
 function getEffectiveQuestionType(quizType: string | undefined, question: any) {
   const normalized = normalizeQuizTypeLabel(quizType);
   if (normalized === 'Mixed Type' && question?.type) {
@@ -90,33 +126,137 @@ function optionText(option: any) {
 
 function formatQuizCountdown(seconds: number | null) {
   if (seconds == null || !Number.isFinite(seconds)) return '--:--';
-  const mins = Math.floor(Math.max(0, seconds) / 60);
-  const secs = Math.floor(Math.max(0, seconds) % 60);
-  return `${mins}:${String(secs).padStart(2, '0')}`;
+  const total = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours > 0) {
+    return `${hours}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
-function getPerformanceComment(percentage: number) {
-  if (percentage >= 90) return "Outstanding! You're a star performer! 🌟";
-  if (percentage >= 80) return "Excellent work! You really know your stuff! 🎯";
-  if (percentage >= 65) return 'Great job! Keep up the good work! 👏';
-  if (percentage >= 50) return 'Good effort! Room for improvement! 💪';
-  if (percentage >= 35) return 'Nice try! Keep practicing! 📚';
-  return "Keep learning! You'll do better next time! 🌱";
+function remainingSecondsUntil(endIso: unknown, nowMs: number) {
+  if (!endIso) return null;
+  const end = new Date(String(endIso)).getTime();
+  if (!Number.isFinite(end)) return null;
+  return Math.max(0, Math.floor((end - nowMs) / 1000));
+}
+
+function isQuizDurationLimited(seconds: unknown) {
+  const n = Number(seconds);
+  return Number.isFinite(n) && n > 0;
+}
+
+function QuizTimerPill({
+  seconds,
+  pulse,
+  compact,
+}: {
+  seconds: number;
+  pulse: Animated.Value;
+  compact?: boolean;
+}) {
+  const critical = seconds <= 10;
+  const warning = seconds <= 60 && !critical;
+  return (
+    <Animated.View
+      style={[
+        styles.timerPill,
+        warning && styles.timerPillWarn,
+        critical && styles.timerPillCrit,
+        critical && { opacity: pulse },
+      ]}>
+      <Ionicons
+        name="time-outline"
+        size={compact ? 13 : 14}
+        color={critical ? '#DC2626' : warning ? '#B45309' : COLORS.primary}
+      />
+      <Text
+        style={[
+          styles.timerPillText,
+          compact && styles.timerPillTextCompact,
+          warning && styles.timerPillTextWarn,
+          critical && styles.timerPillTextCrit,
+        ]}
+        numberOfLines={1}>
+        {formatQuizCountdown(seconds)}
+      </Text>
+    </Animated.View>
+  );
+}
+
+function firstRouteParam(value: string | string[] | undefined) {
+  if (Array.isArray(value)) return value[0] ?? '';
+  return value || '';
+}
+
+function normalizeSharedTeamId(value: unknown) {
+  if (value === undefined || value === null || value === '') return null;
+  const text = String(Array.isArray(value) ? value[0] : value).trim();
+  if (!text || text === 'NaN' || text === 'undefined' || text === 'null') return null;
+  return text;
+}
+
+function readLockAnswer(node: any) {
+  return teamNodeAnswer(node);
+}
+
+function questionHasTeamAnswer(
+  question: any,
+  qIndex: number,
+  liveMap: Record<string, any> | null | undefined,
+  localLock: Record<string, any>,
+  answersById: Record<string, any>
+) {
+  const nodes = findLiveQuestionNodes(liveMap, question, qIndex);
+  if (nodes.some((node) => readLockAnswer(node).trim() !== '')) return true;
+  const ids = spaceRaceQuestionIdAliases(question, qIndex);
+  return ids.some((id) => {
+    const live = liveMap?.[`question_${id}`];
+    const value =
+      readLockAnswer(live) ||
+      localLock[id]?.selectedOption ||
+      localLock[id]?.answer ||
+      answersById[id];
+    return value != null && String(value).trim() !== '';
+  });
+}
+
+function participantAnswerForQuestion(
+  answers: any[] | undefined,
+  question: any,
+  qIndex: number,
+  questionId: string
+) {
+  if (!Array.isArray(answers)) return null;
+  const ids = new Set(spaceRaceQuestionIdAliases(question, qIndex));
+  if (questionId) ids.add(questionId);
+  return (
+    answers.find((row) => {
+      if (!row || row.questionId == null) return false;
+      return ids.has(String(row.questionId));
+    }) || null
+  );
 }
 
 export default function AudienceSpaceRaceQuizScreen() {
   const { profile, user } = useAuth();
   const { source, leave } = useLeaveActivity({ headerBack: false });
   const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  const compactProgressRow = windowWidth < 390;
   const params = useLocalSearchParams<{ raceId?: string; teamId?: string }>();
-  const raceId = String(params.raceId || '');
-  const paramTeamId = Number(params.teamId || 0);
+  const raceId = String(firstRouteParam(params.raceId) || '');
+  const paramTeamIdRaw = firstRouteParam(params.teamId);
+  const paramTeamId = Number(paramTeamIdRaw || 0);
   const [participant, setParticipant] = useState<any>(null);
   const [index, setIndex] = useState(0);
   const [answer, setAnswer] = useState<any>('');
   const [busy, setBusy] = useState(false);
   const [finished, setFinished] = useState(false);
   const [finalScore, setFinalScore] = useState<number | null>(null);
+  const [finalApi, setFinalApi] = useState<SpaceRaceFinalScoreApi | null>(null);
   const [quiz, setQuiz] = useState<any>(null);
   const [quizLoading, setQuizLoading] = useState(true);
   const [quizLoadError, setQuizLoadError] = useState('');
@@ -126,26 +266,12 @@ export default function AudienceSpaceRaceQuizScreen() {
   const [redirectCountdown, setRedirectCountdown] = useState(10);
   const [answersById, setAnswersById] = useState<Record<string, any>>({});
   const [localLock, setLocalLock] = useState<Record<string, any>>({});
+  const [submittedQuestionKeys, setSubmittedQuestionKeys] = useState<Set<string>>(() => new Set());
   const loadGen = useRef(0);
+  const submittedRef = useRef(false);
 
   const loggedIn = isLoggedInAudience(profile, user);
-  const teamId = Number(participant?.teamId || paramTeamId || 0);
-
-  const { value: race } = useRtdbValue(raceId ? `spaceRaces/${raceId}` : null, {
-    enabled: Boolean(raceId),
-  });
-  const { value: teamScoreNode } = useRtdbValue(
-    raceId && teamId ? `space_race_team_scores/${raceId}/team_${teamId}` : null,
-    { enabled: Boolean(raceId && teamId) }
-  );
-  const { value: teamTimer } = useRtdbValue(
-    raceId && teamId ? `space_race_team_timers/${raceId}/team_${teamId}` : null,
-    { enabled: Boolean(raceId && teamId) }
-  );
-  const { value: liveTeamSelections } = useRtdbValue(
-    raceId && teamId ? `space_race_team_selection/${raceId}/team_${teamId}` : null,
-    { enabled: Boolean(raceId && teamId) }
-  );
+  const participantId = participant?.id ? String(participant.id) : '';
 
   const questions = useMemo(() => {
     if (Array.isArray(quiz?.questions)) return quiz.questions;
@@ -154,22 +280,134 @@ export default function AudienceSpaceRaceQuizScreen() {
 
   const question = questions[index];
   const questionId = question ? spaceRaceQuestionId(question, index) : '';
-  const questionAliases = useMemo(
-    () => (question ? spaceRaceQuestionIdAliases(question, index) : []),
+  const liveQuestionKeys = useMemo(
+    () => (question ? spaceRaceLiveQuestionKeys(question, index) : []),
     [question, index]
   );
+
+  const { value: race } = useRtdbValue(raceId ? `spaceRaces/${raceId}` : null, {
+    enabled: Boolean(raceId),
+  });
+  const { value: liveParticipantData } = useRtdbValue(
+    raceId && participantId ? `space_race_participants/${raceId}/${participantId}` : null,
+    { enabled: Boolean(raceId && participantId) }
+  );
+
+  const normalizedTeamId = useMemo(
+    () =>
+      normalizeSharedTeamId(
+        liveParticipantData?.teamId ?? participant?.teamId ?? paramTeamIdRaw
+      ),
+    [liveParticipantData?.teamId, participant?.teamId, paramTeamIdRaw]
+  );
+  const teamIdForApi =
+    normalizedTeamId != null && Number.isFinite(Number(normalizedTeamId))
+      ? Number(normalizedTeamId)
+      : normalizedTeamId;
+  const teamId = teamIdForApi ?? 0;
+
+  const teamSelectionPath =
+    raceId && normalizedTeamId != null
+      ? `space_race_team_selection/${raceId}/team_${normalizedTeamId}`
+      : null;
+  const currentQuestionSelectionPath =
+    teamSelectionPath && questionId ? `${teamSelectionPath}/question_${questionId}` : null;
+
+  const hookedTeamSelections = useLiveTeamSelectionMap(
+    raceId,
+    normalizedTeamId,
+    liveQuestionKeys
+  );
+  const { value: liveTeamRaw } = useRtdbValue(teamSelectionPath, {
+    enabled: Boolean(teamSelectionPath),
+  });
+  const { value: submissionState } = useRtdbValue(currentQuestionSelectionPath, {
+    enabled: Boolean(currentQuestionSelectionPath),
+  });
+  const liveTeamSelections = useMemo(() => {
+    const fromTree = nodesFromSnapshot(liveTeamRaw);
+    return mergeTeamSelectionMaps(hookedTeamSelections, fromTree);
+  }, [hookedTeamSelections, liveTeamRaw]);
+
+  const { value: teamScoreNode } = useRtdbValue(
+    raceId && normalizedTeamId != null
+      ? `space_race_team_scores/${raceId}/team_${normalizedTeamId}`
+      : null,
+    { enabled: Boolean(raceId && normalizedTeamId != null) }
+  );
+  const { value: teamTimer } = useRtdbValue(
+    raceId && normalizedTeamId != null
+      ? `space_race_team_timers/${raceId}/team_${normalizedTeamId}`
+      : null,
+    { enabled: Boolean(raceId && normalizedTeamId != null) }
+  );
+  const { value: serverTimeOffsetRaw } = useRtdbValue('.info/serverTimeOffset', {
+    enabled: Boolean(raceId),
+  });
+  const quizDurationSeconds = Number(race?.settings?.countdown);
+  const quizDurationLimited = isQuizDurationLimited(quizDurationSeconds);
+  const quizTimerPulse = useRef(new Animated.Value(1)).current;
+  const participantAnswerRow = participantAnswerForQuestion(
+    liveParticipantData?.answers,
+    question,
+    index,
+    questionId
+  );
   const lockNode = useMemo(() => {
-    const nodes: any[] = [];
-    questionAliases.forEach((id) => {
-      const live = liveTeamSelections?.[`question_${id}`];
-      if (live) nodes.push(live);
-      if (localLock[id]) nodes.push(localLock[id]);
+    const liveNodes = [...findLiveQuestionNodes(liveTeamSelections, question, index)];
+    if (submissionState && typeof submissionState === 'object') {
+      liveNodes.push(submissionState);
+    }
+    liveQuestionKeys.forEach((id) => {
+      if (localLock[id]) liveNodes.push(localLock[id]);
     });
-    return pickQuestionLockNode(nodes);
-  }, [questionAliases, liveTeamSelections, localLock]);
-  const submitted = isSubmittedLockNode(lockNode);
-  const displaySelectedOption = lockNode?.selectedOption ?? lockNode?.answer ?? answer;
-  const selectedByName = lockNode?.submittedByName || lockNode?.selectedByName || '';
+    if (questionId && localLock[questionId]) liveNodes.push(localLock[questionId]);
+    if (participantAnswerRow) {
+      liveNodes.push({
+        selectedOption: participantAnswerRow.answer ?? participantAnswerRow.selectedOption,
+        answer: participantAnswerRow.answer,
+        submitted: true,
+        submittedBy: participantAnswerRow.submittedBy,
+        submittedByName: participantAnswerRow.submittedByName,
+      });
+    }
+    return pickQuestionLockNode(liveNodes);
+  }, [
+    liveTeamSelections,
+    question,
+    index,
+    submissionState,
+    localLock,
+    questionId,
+    liveQuestionKeys,
+    participantAnswerRow,
+  ]);
+  const participantAnswerLocksCurrent = Boolean(participantAnswerRow);
+  const submitted =
+    isSubmittedLockNode(lockNode) ||
+    isSubmittedLockNode(submissionState) ||
+    (questionId ? submittedQuestionKeys.has(questionId) : false) ||
+    liveQuestionKeys.some((id) => submittedQuestionKeys.has(id)) ||
+    participantAnswerLocksCurrent;
+  submittedRef.current = submitted;
+  const liveAnswer = readLockAnswer(lockNode);
+  const lockedAnswerValue = submitted
+    ? readLockAnswer(lockNode).trim() ||
+      readLockAnswer(submissionState).trim() ||
+      String(participantAnswerRow?.answer ?? participantAnswerRow?.selectedOption ?? '').trim() ||
+      ''
+    : '';
+  const displaySelectedOption = submitted
+    ? lockedAnswerValue || liveAnswer
+    : liveAnswer || (questionId ? answersById[questionId] : '') || '';
+  const memberName = teammateDisplayName(participant, profile);
+  const selectedByName = submitted
+    ? lockNode?.submittedByName ||
+      lockNode?.selectedByName ||
+      submissionState?.submittedByName ||
+      participantAnswerRow?.submittedByName ||
+      'A teammate'
+    : lockNode?.selectedByName || lockNode?.submittedByName || 'A teammate';
 
   const headerTitle = useMemo(() => {
     const candidates = [
@@ -195,6 +433,43 @@ export default function AudienceSpaceRaceQuizScreen() {
       if (p) setParticipant(p);
     });
   }, [raceId]);
+
+  useEffect(() => {
+    if (!liveParticipantData || !participantId) return;
+    setParticipant((prev: any) => {
+      const base = prev || { id: participantId };
+      const nextTeam = liveParticipantData.teamId ?? base.teamId;
+      const nextAnswers = liveParticipantData.answers ?? base.answers;
+      const nextName = liveParticipantData.name ?? base.name;
+      if (
+        String(base.teamId ?? '') === String(nextTeam ?? '') &&
+        base.answers === nextAnswers &&
+        String(base.name ?? '') === String(nextName ?? '')
+      ) {
+        return prev || base;
+      }
+      return { ...base, ...liveParticipantData, id: base.id || participantId };
+    });
+  }, [liveParticipantData, participantId]);
+
+  useEffect(() => {
+    if (!liveTeamSelections || typeof liveTeamSelections !== 'object') return;
+    setAnswersById((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      Object.entries(liveTeamSelections).forEach(([nodeKey, nodeVal]: [string, any]) => {
+        if (!nodeKey.startsWith('question_') || !nodeVal) return;
+        const id = nodeKey.slice('question_'.length);
+        const value = nodeVal.selectedOption ?? nodeVal.answer;
+        if (value == null || String(value).trim() === '') return;
+        if (String(next[id] ?? '') !== String(value)) {
+          next[id] = value;
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [liveTeamSelections]);
 
   useEffect(() => {
     if (getRaceStatus(race) === 'completed') setRaceEnded(true);
@@ -269,24 +544,96 @@ export default function AudienceSpaceRaceQuizScreen() {
   }, [raceId, paramTeamId]);
 
   useEffect(() => {
+    if (finished) return undefined;
     const endIso = teamTimer?.endTime;
-    if (!endIso || finished) return undefined;
+    const started = Boolean(teamTimer?.quizStartedAt);
+    if (!quizDurationLimited || !started || !endIso) {
+      setTimeLeft(null);
+      return undefined;
+    }
     const tick = () => {
-      const remaining = Math.max(0, Math.floor((new Date(endIso).getTime() - Date.now()) / 1000));
+      const now = Date.now() + (Number(serverTimeOffsetRaw) || 0);
+      const remaining = remainingSecondsUntil(endIso, now);
+      if (remaining == null) {
+        setTimeLeft(null);
+        return;
+      }
       setTimeLeft(remaining);
-      if (remaining <= 0 && teamTimer?.quizStartedAt) setQuizTimeExpired(true);
+      if (remaining <= 0) setQuizTimeExpired(true);
     };
     tick();
     const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
-  }, [teamTimer?.endTime, teamTimer?.quizStartedAt, finished]);
+  }, [
+    teamTimer?.endTime,
+    teamTimer?.quizStartedAt,
+    quizDurationLimited,
+    serverTimeOffsetRaw,
+    finished,
+  ]);
 
   useEffect(() => {
-    const liveAnswer = lockNode?.selectedOption ?? lockNode?.answer;
-    if (liveAnswer != null && String(liveAnswer) !== '') setAnswer(liveAnswer);
-    else if (questionId && answersById[questionId] != null) setAnswer(answersById[questionId]);
-    else setAnswer('');
-  }, [lockNode, index, questionId]);
+    if (timeLeft == null || timeLeft > 10) {
+      quizTimerPulse.setValue(1);
+      return undefined;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(quizTimerPulse, { toValue: 0.55, duration: 550, useNativeDriver: true }),
+        Animated.timing(quizTimerPulse, { toValue: 1, duration: 550, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => {
+      loop.stop();
+      quizTimerPulse.setValue(1);
+    };
+  }, [timeLeft, quizTimerPulse]);
+
+  useEffect(() => {
+    const currentLive = readLockAnswer(lockNode);
+    if (submitted) {
+      if (currentLive) setAnswer(currentLive);
+      return;
+    }
+    if (currentLive) {
+      setAnswer(currentLive);
+      return;
+    }
+    if (questionId && answersById[questionId] != null) {
+      setAnswer(answersById[questionId]);
+      return;
+    }
+    setAnswer('');
+  }, [lockNode, submitted, index, questionId]);
+
+  useEffect(() => {
+    if (!submitted || !lockedAnswerValue) return;
+    const ids = new Set([questionId, ...liveQuestionKeys]);
+    setAnswersById((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      ids.forEach((id) => {
+        if (!id) return;
+        if (String(next[id] ?? '') !== String(lockedAnswerValue)) {
+          next[id] = lockedAnswerValue;
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [submitted, lockedAnswerValue, questionId, liveQuestionKeys]);
+
+  useEffect(() => {
+    if (!__DEV__) return;
+    if (submitted && !String(displaySelectedOption || '').trim()) {
+      console.warn('[SpaceRace] locked but no option is marked', {
+        questionId,
+        index,
+        lockNode,
+      });
+    }
+  }, [submitted, displaySelectedOption, questionId, index, lockNode]);
 
   useEffect(() => {
     if (!finished) return undefined;
@@ -312,46 +659,146 @@ export default function AudienceSpaceRaceQuizScreen() {
   }, [finished, redirectCountdown, raceId, source]);
 
   const teamScore = teamScoreFromNode(teamScoreNode);
-  const timerBlocksSubmit = quizTimeExpired || raceEnded;
-  const showFinalScore = Boolean(
-    quiz?.launchSettings?.spaceRaceSettings?.showFinalScore ||
-      quiz?.spaceRaceSettings?.showFinalScore
+  const progressFromShared = useMemo(() => {
+    if (!questions.length) return 0;
+    const count = questions.filter((q: any, qIndex: number) =>
+      questionHasTeamAnswer(q, qIndex, liveTeamSelections, localLock, answersById)
+    ).length;
+    return (count / questions.length) * 100;
+  }, [questions, liveTeamSelections, localLock, answersById]);
+  const quizClockExpired =
+    quizDurationLimited &&
+    Boolean(teamTimer?.quizStartedAt && teamTimer?.endTime) &&
+    (remainingSecondsUntil(
+      teamTimer?.endTime,
+      Date.now() + (Number(serverTimeOffsetRaw) || 0)
+    ) ?? 1) <= 0;
+  const timerBlocksSubmit = quizTimeExpired || quizClockExpired || raceEnded;
+  const quizOptions = useMemo(
+    () => readSpaceRaceQuizOptions(quiz, race?.settings),
+    [quiz, race?.settings]
   );
+  const showFinalScore = quizOptions.showFinalScore;
+  const showQuestionFeedback = quizOptions.showQuestionFeedback;
+  const prevSubmittedRef = useRef<boolean | null>(null);
+
+  useEffect(() => {
+    prevSubmittedRef.current = null;
+  }, [index, questionId]);
+
+  useEffect(() => {
+    const wasSubmitted = prevSubmittedRef.current;
+    prevSubmittedRef.current = submitted;
+    if (wasSubmitted === null) return;
+    if (!showQuestionFeedback || !submitted || wasSubmitted) return;
+    const by = String(lockNode?.submittedBy || lockNode?.selectedBy || '');
+    if (by && participantId && by === participantId) return;
+    const isCorrect = lockNode?.isCorrect === true;
+    showToast({
+      type: 'info',
+      title: isCorrect ? '✅ Correct answer!' : '❌ Incorrect answer',
+      icon: 'checkmark-circle',
+    });
+  }, [
+    submitted,
+    showQuestionFeedback,
+    lockNode?.isCorrect,
+    lockNode?.submittedBy,
+    lockNode?.selectedBy,
+    participantId,
+  ]);
 
   const optionList = () => {
     if (!question) return [] as string[];
+    if (Array.isArray(question.options) && question.options.length > 0) {
+      return question.options.map(optionText).filter(Boolean);
+    }
     const effective = getEffectiveQuestionType(quiz?.type, question);
     if (effective === 'True / False' || String(question.type || '').toLowerCase().includes('true')) {
       return ['True', 'False'];
     }
-    if (Array.isArray(question.options)) return question.options.map(optionText).filter(Boolean);
     return [];
   };
 
   const applyLocalLock = (id: string, node: any) => {
-    setLocalLock((prev) => ({
-      ...prev,
-      [id]: { ...(prev[id] || {}), ...node, submitted: true },
-    }));
+    if (!id) return;
+    const ids = new Set<string>([id, ...liveQuestionKeys]);
+    setLocalLock((prev) => {
+      const next = { ...prev };
+      ids.forEach((key) => {
+        next[key] = { ...(prev[key] || {}), ...node };
+      });
+      return next;
+    });
+  };
+
+  const markQuestionSubmitted = (id: string, node: any) => {
+    if (!id) return;
+    const ids = new Set<string>([id, ...liveQuestionKeys]);
+    setSubmittedQuestionKeys((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      ids.forEach((key) => {
+        if (!next.has(key)) {
+          next.add(key);
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+    applyLocalLock(id, { ...node, submitted: true });
+  };
+
+  const unmarkOptimisticSubmit = (id: string) => {
+    if (!id) return;
+    const ids = new Set<string>([id, ...liveQuestionKeys]);
+    setSubmittedQuestionKeys((prev) => {
+      if (![...ids].some((key) => prev.has(key))) return prev;
+      const next = new Set(prev);
+      ids.forEach((key) => next.delete(key));
+      return next;
+    });
+    setLocalLock((prev) => {
+      const next = { ...prev };
+      ids.forEach((key) => {
+        if (next[key]) next[key] = { ...next[key], submitted: false };
+      });
+      return next;
+    });
   };
 
   const onSelect = async (value: any) => {
     if (timerBlocksSubmit || submitted) return;
+    if (isSubmittedLockNode(lockNode)) return;
     setAnswer(value);
     if (questionId) {
       setAnswersById((prev) => ({ ...prev, [questionId]: value }));
     }
-    if (!participant?.id || !questionId) return;
+    if (!participantId || !questionId || normalizedTeamId == null) return;
+    const optimisticSelection = {
+      selectedOption: value,
+      selectedBy: participantId,
+      selectedByName: memberName,
+      submitted: false,
+    };
+    setLocalLock((prev) => {
+      if (isSubmittedLockNode(prev[questionId])) return prev;
+      return { ...prev, [questionId]: { ...optimisticSelection } };
+    });
     try {
       await setTeamSelection(raceId, {
-        teamId,
+        teamId: normalizedTeamId,
         questionId,
         selectedOption: value,
-        participantId: String(participant.id),
-        participantName: participant.name,
+        participantId,
+        participantName: memberName,
+        senderName: memberName,
       });
-    } catch {
-      // selection sync best-effort
+    } catch (err) {
+      const errMsg = String((err as any)?.data?.error || (err as Error)?.message || '');
+      if (errMsg.toLowerCase().includes('already submitted')) {
+        markQuestionSubmitted(questionId, { submitted: true, selectedOption: value });
+      }
     }
   };
 
@@ -363,32 +810,37 @@ export default function AudienceSpaceRaceQuizScreen() {
 
   const finishQuiz = async () => {
     setFinished(true);
-    if (!participant?.id) return;
+    if (!participantId || normalizedTeamId == null) return;
     try {
       const scoreRes: any = await getFinalScore(raceId, {
-        teamId,
-        participantId: String(participant.id),
+        teamId: teamIdForApi as number,
+        participantId,
       });
+      const payload = (scoreRes?.data ?? scoreRes) as SpaceRaceFinalScoreApi;
+      setFinalApi(payload);
       const score =
-        scoreRes?.data?.score ?? scoreRes?.score ?? teamScore ?? participant?.score ?? 0;
+        payload?.score ?? scoreRes?.score ?? teamScore ?? participant?.score ?? 0;
       setFinalScore(Number(score) || 0);
       const updated = { ...participant, score: Number(score) || 0 };
       setParticipant(updated);
       await saveSpaceRaceParticipant(updated);
     } catch {
+      setFinalApi(null);
       setFinalScore(teamScore);
     }
   };
 
   const onSubmit = async () => {
-    if (!participant?.id || !question || busy) return;
+    if (!participantId || !question || busy || normalizedTeamId == null) return;
     if (timerBlocksSubmit) {
       setQuizTimeExpired(true);
       return;
     }
     if (submitted) return;
     const answerToSend =
-      (answer !== '' && answer != null ? answer : displaySelectedOption) ?? '';
+      (displaySelectedOption != null && String(displaySelectedOption).trim() !== ''
+        ? displaySelectedOption
+        : answer) ?? '';
     if (answerToSend === '' || answerToSend == null || !String(answerToSend).trim()) {
       showAlert({
         type: 'warning',
@@ -402,21 +854,20 @@ export default function AudienceSpaceRaceQuizScreen() {
     const submittedSelection = {
       selectedOption: answerToSend,
       submitted: true,
-      submittedBy: String(participant.id),
-      submittedByName: participant.name || 'A teammate',
-      selectedByName: participant.name || 'A teammate',
+      submittedBy: participantId,
+      submittedByName: memberName,
+      selectedByName: memberName,
     };
-    applyLocalLock(questionId, submittedSelection);
-    questionAliases.forEach((id) => applyLocalLock(id, submittedSelection));
+    markQuestionSubmitted(questionId, submittedSelection);
 
     setBusy(true);
     try {
       const response = await submitRaceAnswer(raceId, {
-        teamId,
+        teamId: normalizedTeamId,
         questionId,
         answer: answerToSend,
-        participantId: String(participant.id),
-        participantName: participant.name,
+        participantId,
+        participantName: memberName,
         questionIndex: index,
       });
       if ((response as any)?.expired) {
@@ -426,15 +877,42 @@ export default function AudienceSpaceRaceQuizScreen() {
       if (!response.success && response.error) {
         throw new Error(response.error);
       }
+      markQuestionSubmitted(questionId, submittedSelection);
+      if (__DEV__) {
+        setTimeout(() => {
+          if (!submittedRef.current) {
+            console.warn(
+              '[SpaceRace] submit write succeeded but the current screen has not locked within 1s',
+              { questionId, index }
+            );
+          }
+        }, 1000);
+      }
+      if (showQuestionFeedback) {
+        const payload = (response as any)?.data ?? response;
+        const isCorrect = payload?.isCorrect === true;
+        showToast({
+          type: 'info',
+          title: isCorrect ? '✅ Correct answer!' : '❌ Incorrect answer',
+          icon: 'checkmark-circle',
+        });
+      } else {
+        showToast({
+          type: 'success',
+          title: 'Answer submitted for your team.',
+          icon: 'checkmark-circle',
+        });
+      }
       try {
         await setTeamSelection(raceId, {
-          teamId,
+          teamId: normalizedTeamId,
           questionId,
           selectedOption: answerToSend,
-          participantId: String(participant.id),
-          participantName: participant.name,
+          participantId,
+          participantName: memberName,
+          senderName: memberName,
           submitted: true,
-          submittedByName: participant.name || 'A teammate',
+          submittedByName: memberName,
         });
       } catch {
         // submit-answer already wrote the lock
@@ -447,21 +925,24 @@ export default function AudienceSpaceRaceQuizScreen() {
       }
       const errMsg = String(data?.error || (err as Error)?.message || '');
       if (errMsg.toLowerCase().includes('already submitted')) {
-        applyLocalLock(questionId, submittedSelection);
+        try {
+          const existing = await getTeamSelection(raceId, normalizedTeamId, questionId);
+          const payload = (existing as any)?.data;
+          if (payload && typeof payload === 'object') {
+            markQuestionSubmitted(questionId, { ...payload, submitted: true });
+          } else {
+            markQuestionSubmitted(questionId, submittedSelection);
+          }
+        } catch {
+          markQuestionSubmitted(questionId, submittedSelection);
+        }
         return;
       }
-      setLocalLock((prev) => {
-        const next = { ...prev };
-        questionAliases.forEach((id) => {
-          if (next[id]) next[id] = { ...next[id], submitted: false };
-        });
-        return next;
-      });
-      showAlert({
-        type: 'error',
-        title: 'Submit failed',
-        message: cleanErrorMessage(err, 'Try again'),
-        primary: { label: 'Close' },
+      unmarkOptimisticSubmit(questionId);
+      showToast({
+        type: 'info',
+        title: "Couldn't submit. Try again.",
+        icon: 'alert-circle',
       });
     } finally {
       setBusy(false);
@@ -556,12 +1037,15 @@ export default function AudienceSpaceRaceQuizScreen() {
   }
 
   if (finished) {
-    const totalQuestionsCount = questions.length;
-    const displayScore = finalScore ?? teamScore;
-    const displayPercentage =
-      totalQuestionsCount > 0
-        ? Math.round((Number(displayScore) / totalQuestionsCount) * 100)
-        : 0;
+    const resultStats = spaceRaceResultStats({
+      totalQuestions: questions.length,
+      teamSelections: liveTeamSelections,
+      teamScoreOutOf100: finalScore ?? teamScore,
+      api: finalApi,
+    });
+    const displayScore = resultStats.correctCount;
+    const displayPercentage = resultStats.percentage;
+    const totalQuestionsCount = resultStats.totalQuestions;
 
     if (!showFinalScore) {
       return resultShell(
@@ -604,9 +1088,7 @@ export default function AudienceSpaceRaceQuizScreen() {
               <Text style={styles.statLabel}>Correct</Text>
             </View>
             <View style={styles.statCell}>
-              <Text style={styles.statNum}>
-                {Math.max(0, totalQuestionsCount - Number(displayScore || 0))}
-              </Text>
+              <Text style={styles.statNum}>{resultStats.incorrectCount}</Text>
               <Text style={styles.statLabel}>Incorrect</Text>
             </View>
             <View style={styles.statCell}>
@@ -652,13 +1134,25 @@ export default function AudienceSpaceRaceQuizScreen() {
     (options.length === 0 &&
       !String(effectiveType).toLowerCase().includes('multiple') &&
       !String(effectiveType).toLowerCase().includes('true'));
-  const answeredCount = questions.filter((q: any, qIndex: number) => {
-    const id = spaceRaceQuestionId(q, qIndex);
-    const stored = answersById[id];
-    if (qIndex === index && (answer != null && String(answer).trim() !== '')) return true;
-    return stored != null && String(stored).trim() !== '';
-  }).length;
-  const progressPct = questions.length ? (answeredCount / questions.length) * 100 : 0;
+  const currentCountsTowardProgress =
+    displaySelectedOption != null && String(displaySelectedOption).trim() !== ''
+      ? !questionHasTeamAnswer(question, index, liveTeamSelections, localLock, answersById)
+      : false;
+  const progressPct = questions.length
+    ? progressFromShared + (currentCountsTowardProgress ? 100 / questions.length : 0)
+    : 0;
+  if (__DEV__ && submitted && questions.length) {
+    const currentCounted =
+      questionHasTeamAnswer(question, index, liveTeamSelections, localLock, answersById) ||
+      currentCountsTowardProgress;
+    if (!currentCounted) {
+      console.warn('[SpaceRace] shown percentage differs from shared-data progress', {
+        questionId,
+        progressPct,
+        progressFromShared,
+      });
+    }
+  }
   const submittedByName = selectedByName || 'A teammate';
   const hasAnswer =
     (answer !== '' && answer != null && String(answer).trim() !== '') ||
@@ -678,24 +1172,23 @@ export default function AudienceSpaceRaceQuizScreen() {
               SPACE_RACE_FAB_BOTTOM_PAD + insets.bottom + SPACING[8] + KEYBOARD_BOTTOM_GAP,
           },
         ]}>
-        {timeLeft != null ? (
-          <View style={styles.timerBanner}>
-            <View style={styles.timerLeft}>
-              <Ionicons name="time-outline" size={16} color={COLORS.primary} />
-              <Text style={styles.timerLabel}>Quiz duration timer</Text>
-            </View>
-            <Text style={[styles.timerValue, timeLeft < 60 && styles.timerUrgent]}>
-              Time remaining: {formatQuizCountdown(timeLeft)}
-            </Text>
-          </View>
-        ) : null}
-
         <View style={styles.questionCard}>
           <View style={styles.progressRow}>
-            <Text style={styles.progressMeta}>
+            <Text
+              style={[styles.progressMeta, compactProgressRow && styles.progressMetaCompact]}
+              numberOfLines={1}>
               Question {index + 1} of {questions.length}
             </Text>
-            <Text style={styles.progressPct}>{Math.round(progressPct)}% Complete</Text>
+            <View style={styles.timerSlot} pointerEvents="none">
+              {timeLeft != null ? (
+                <QuizTimerPill seconds={timeLeft} pulse={quizTimerPulse} compact={compactProgressRow} />
+              ) : null}
+            </View>
+            <Text
+              style={[styles.progressPct, compactProgressRow && styles.progressPctCompact]}
+              numberOfLines={1}>
+              {Math.round(progressPct)}% Complete
+            </Text>
           </View>
           <View style={styles.progressTrack}>
             <View style={[styles.progressFill, { width: `${progressPct}%` }]} />
@@ -724,7 +1217,7 @@ export default function AudienceSpaceRaceQuizScreen() {
               <Text style={styles.teamPickText}>
                 Team selected:{' '}
                 <Text style={styles.teamPickStrong}>{String(displaySelectedOption)}</Text>
-                {selectedByName ? ` (${selectedByName})` : ''}
+                {` (${selectedByName || 'A teammate'})`}
               </Text>
             </View>
           ) : null}
@@ -740,11 +1233,14 @@ export default function AudienceSpaceRaceQuizScreen() {
               multiline
             />
           ) : (
-            options.map((option: string) => {
-              const selected = String(displaySelectedOption ?? answer) === String(option);
+            options.map((option: string, optionIndex: number) => {
+              const rawOption = Array.isArray(question.options)
+                ? question.options[optionIndex]
+                : option;
+              const selected = optionMatchesSelection(rawOption ?? option, displaySelectedOption);
               return (
                 <TouchableOpacity
-                  key={String(option)}
+                  key={`${optionIndex}-${String(option)}-${selected ? 'selected' : 'idle'}`}
                   style={[
                     styles.option,
                     selected && styles.optionOn,
@@ -772,35 +1268,27 @@ export default function AudienceSpaceRaceQuizScreen() {
               ]}
               onPress={onSubmit}
               disabled={busy || !hasAnswer || timerBlocksSubmit}>
-              <Text style={styles.primaryLabel}>
-                {busy ? 'Submitting...' : '🚀 Submit Answer for Team'}
-              </Text>
+              {busy ? (
+                <View style={styles.submitBusy}>
+                  <ActivityIndicator color={COLORS.white} size="small" />
+                  <Text style={styles.primaryLabel}>Submitting...</Text>
+                </View>
+              ) : (
+                <Text style={styles.primaryLabel}>🚀 Submit Answer for Team</Text>
+              )}
             </TouchableOpacity>
-          ) : index === questions.length - 1 ? (
-            <TouchableOpacity
-              style={[styles.primary, styles.fullWidth]}
-              onPress={finishQuiz}>
-              <Text style={styles.primaryLabel}>Finish</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={[styles.primary, styles.fullWidth]}
-              onPress={() => setIndex((prev) => prev + 1)}>
-              <Text style={styles.primaryLabel}>Next →</Text>
-            </TouchableOpacity>
-          )}
+          ) : null}
 
-          <TouchableOpacity
-            style={[styles.prevBtn, index === 0 && styles.prevBtnOff]}
-            onPress={() => setIndex((prev) => Math.max(0, prev - 1))}
-            disabled={index === 0}>
-            <Ionicons
-              name="arrow-back"
-              size={16}
-              color={index === 0 ? COLORS.mutedText : COLORS.primary}
-            />
-            <Text style={[styles.prevLabel, index === 0 && styles.prevLabelOff]}>Previous</Text>
-          </TouchableOpacity>
+          <QuizQuestionNavButtons
+            previousDisabled={index === 0}
+            onPrevious={() => setIndex((prev) => Math.max(0, prev - 1))}
+            hidePrimary={!submitted}
+            primaryLabel={index === questions.length - 1 ? 'Finish' : 'Next'}
+            onPrimary={
+              index === questions.length - 1 ? finishQuiz : () => setIndex((prev) => prev + 1)
+            }
+            showTrailingArrow={index !== questions.length - 1}
+          />
         </View>
       </ScrollView>
       {fab}
@@ -833,22 +1321,35 @@ const styles = StyleSheet.create({
     gap: SPACING[3],
   },
   content: { padding: SPACING[4], gap: SPACING[3] },
-  timerBanner: {
-    backgroundColor: COLORS.blush,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: COLORS.cardBorder,
-    paddingHorizontal: SPACING[3],
-    paddingVertical: SPACING[3],
+  timerPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: SPACING[2],
+    gap: 3,
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    backgroundColor: COLORS.blush,
+    justifyContent: 'center',
+    flexShrink: 0,
   },
-  timerLeft: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1 },
-  timerLabel: { color: COLORS.primary, fontSize: 13, fontWeight: FONT_WEIGHTS.medium },
-  timerValue: { color: '#15803D', fontSize: 13, fontWeight: FONT_WEIGHTS.medium },
-  timerUrgent: { color: '#DC2626' },
+  timerPillWarn: { backgroundColor: '#FEF3C7' },
+  timerPillCrit: { backgroundColor: '#FEE2E2' },
+  timerPillText: {
+    color: COLORS.primary,
+    fontSize: 13,
+    fontWeight: FONT_WEIGHTS.medium,
+    fontVariant: ['tabular-nums'],
+  },
+  timerPillTextCompact: { fontSize: 12 },
+  timerPillTextWarn: { color: '#B45309' },
+  timerPillTextCrit: { color: '#DC2626' },
+  timerSlot: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 0,
+    paddingHorizontal: 2,
+  },
   questionCard: {
     backgroundColor: COLORS.white,
     borderRadius: RADIUS.md,
@@ -860,11 +1361,25 @@ const styles = StyleSheet.create({
   progressRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: SPACING[2],
+    flexWrap: 'nowrap',
+    width: '100%',
   },
-  progressMeta: { fontSize: 13, color: COLORS.inkSecondary },
-  progressPct: { fontSize: 13, fontWeight: FONT_WEIGHTS.medium, color: COLORS.primary },
+  progressMeta: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 13,
+    color: COLORS.inkSecondary,
+  },
+  progressMetaCompact: { fontSize: 12 },
+  progressPct: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 13,
+    fontWeight: FONT_WEIGHTS.medium,
+    color: COLORS.primary,
+    textAlign: 'right',
+  },
+  progressPctCompact: { fontSize: 12 },
   progressTrack: {
     height: 5,
     borderRadius: 999,
@@ -983,6 +1498,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING[4],
   },
   primaryLabel: { color: COLORS.white, fontWeight: FONT_WEIGHTS.semibold },
+  submitBusy: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   fullWidth: { width: '100%' },
   disabled: { opacity: 0.6 },
   heading: { color: COLORS.text, fontSize: 24, fontWeight: FONT_WEIGHTS.bold, textAlign: 'center' },
@@ -1015,21 +1531,4 @@ const styles = StyleSheet.create({
   },
   statNum: { fontSize: 22, fontWeight: FONT_WEIGHTS.bold, color: COLORS.text },
   statLabel: { fontSize: 11, color: COLORS.inkSecondary },
-  prevBtn: {
-    minHeight: 44,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: COLORS.primary,
-    backgroundColor: COLORS.white,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-  },
-  prevBtnOff: {
-    borderColor: COLORS.muted,
-    backgroundColor: COLORS.mutedSoft,
-  },
-  prevLabel: { color: COLORS.primary, fontWeight: FONT_WEIGHTS.medium },
-  prevLabelOff: { color: COLORS.mutedText },
 });

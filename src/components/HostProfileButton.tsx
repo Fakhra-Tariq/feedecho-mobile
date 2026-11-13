@@ -14,27 +14,45 @@ import { COLORS, FONT_WEIGHTS, SHADOWS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { hostInitials } from '@/lib/hostProfile';
 
+type Props = {
+  profileRoute?: Href;
+  fallbackName?: string;
+  emptyInitial?: string;
+  onLogout?: () => void | Promise<void>;
+};
+
 /**
- * Host header avatar — matches Web HostLayout dropdown (Profile + Logout).
- * Shared via host/_layout.tsx headerRight on all host tabs.
+ * Header avatar dropdown (name, email, Profile, Logout).
+ * Host layouts use defaults. Student layouts pass the audience Profile route.
  */
-export function HostProfileButton() {
+export function HostProfileButton({
+  profileRoute = '/host/profile' as Href,
+  fallbackName = 'Host',
+  emptyInitial = 'H',
+  onLogout,
+}: Props = {}) {
   const insets = useSafeAreaInsets();
-  const { profile, signOut } = useAuth();
+  const { profile, user, signOut } = useAuth();
   const [open, setOpen] = useState(false);
 
-  const name = profile?.name || 'Host';
-  const email = profile?.email || '';
+  const rawName = String(profile?.name || '').trim();
+  const name = rawName || fallbackName;
+  const email = String(profile?.email || user?.email || '').trim();
+  const initials = rawName ? hostInitials(rawName) : emptyInitial;
 
   const close = () => setOpen(false);
 
   const onProfile = () => {
     close();
-    router.push('/host/profile' as Href);
+    router.push(profileRoute);
   };
 
-  const onLogout = async () => {
+  const onLogoutPress = async () => {
     close();
+    if (onLogout) {
+      await onLogout();
+      return;
+    }
     // Same flow as LogoutButton — AuthContext.signOut, then landing.
     await signOut();
     router.replace('/' as Href);
@@ -50,7 +68,7 @@ export function HostProfileButton() {
         style={({ pressed }) => [styles.avatarHit, pressed && styles.pressed]}
         hitSlop={8}>
         <View style={styles.avatar}>
-          <Text style={styles.avatarText}>{hostInitials(name)}</Text>
+          <Text style={styles.avatarText}>{initials}</Text>
         </View>
       </Pressable>
 
@@ -99,7 +117,9 @@ export function HostProfileButton() {
             </Pressable>
 
             <Pressable
-              onPress={onLogout}
+              onPress={() => {
+                void onLogoutPress();
+              }}
               style={({ pressed }) => [
                 styles.item,
                 styles.logoutItem,
@@ -196,3 +216,14 @@ const styles = StyleSheet.create({
     color: '#DC2626',
   },
 });
+
+/** Student dashboard avatar — same menu, student Profile route and sign-out. */
+export function StudentAccountButton() {
+  return (
+    <HostProfileButton
+      profileRoute={'/audience/profile' as Href}
+      fallbackName="Audience"
+      emptyInitial="S"
+    />
+  );
+}

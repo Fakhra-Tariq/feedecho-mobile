@@ -404,7 +404,7 @@ export default function AudienceSpaceRaceScreen() {
 
   if (phase === 'join') {
     return (
-      <KeyboardSafeScreen scroll={false} style={styles.screen}>
+      <KeyboardSafeScreen style={styles.screen}>
         <View style={styles.card}>
           <Text style={styles.heading}>Join Space Race</Text>
           <Text style={styles.hint}>Enter the race code from your host</Text>

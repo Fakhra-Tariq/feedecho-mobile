@@ -60,7 +60,6 @@ export function ActivityCreatedModal({ visible, title, code, onClose }: Props) {
             <Text style={styles.codeLabel}>Audience Access Code</Text>
             <Text
               style={styles.codeValue}
-              selectable
               accessibilityRole="text"
               accessibilityLabel={`Audience access code ${code}`}>
               {code}

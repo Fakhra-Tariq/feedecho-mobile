@@ -10,14 +10,9 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import {
-  KEYBOARD_BOTTOM_GAP,
-  KEYBOARD_SCROLL_PROPS,
-  KeyboardSafeScreen,
-} from '@/components/KeyboardSafeScreen';
-import { COLORS, FONT_WEIGHTS, SHADOWS, SPACING } from '@/constants/theme';
+import { KeyboardModalFrame } from '@/components/KeyboardSafeScreen';
+import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING } from '@/constants/theme';
 import {
   buildEditingQuizFromAiResponse,
   isPromptInvalid,
@@ -48,7 +43,6 @@ type Props = {
 };
 
 export function AiQuizGeneratorModal({ visible, onClose, onGenerated }: Props) {
-  const insets = useSafeAreaInsets();
   const [prompt, setPrompt] = useState('');
   const [questionTypes, setQuestionTypes] = useState(['mcq', 'trueFalse', 'shortAnswer']);
   const [difficulty, setDifficulty] = useState('medium');
@@ -108,15 +102,7 @@ export function AiQuizGeneratorModal({ visible, onClose, onGenerated }: Props) {
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <KeyboardSafeScreen variant="modal" scroll={false} style={styles.screen}>
-        <View
-          style={[
-            styles.sheetWrap,
-            {
-              paddingTop: Math.max(insets.top, SPACING[3]),
-              paddingBottom: Math.max(insets.bottom, SPACING[3]),
-            },
-          ]}>
+      <KeyboardModalFrame style={styles.screen} scrollChildren={false}>
           <View style={styles.card}>
             <View style={styles.header}>
               <View style={styles.headerCopy}>
@@ -136,84 +122,106 @@ export function AiQuizGeneratorModal({ visible, onClose, onGenerated }: Props) {
 
             <ScrollView
               style={styles.body}
-              contentContainerStyle={[styles.content, { paddingBottom: KEYBOARD_BOTTOM_GAP }]}
-              {...KEYBOARD_SCROLL_PROPS}>
-              <Text style={styles.label}>Prompt</Text>
-              <TextInput
-                value={prompt}
-                onChangeText={(value) => {
-                  setPrompt(value);
-                  if (!isPromptInvalid(value)) setError(null);
-                }}
-                placeholder="e.g. Object-oriented programming: classes, objects, inheritance and polymorphism"
-                placeholderTextColor={COLORS.darkTextSecondary}
-                multiline
-                style={styles.prompt}
-              />
-              {error ? <Text style={styles.error}>{error}</Text> : null}
-
-              <Text style={styles.label}>Question type</Text>
-              <View style={styles.typeList}>
-                {QUESTION_TYPE_OPTIONS.map((option) => {
-                  const active = questionTypes.includes(option.value);
-                  return (
-                    <TouchableOpacity
-                      key={option.value}
-                      style={styles.typeRow}
-                      onPress={() => toggleType(option.value)}
-                      accessibilityRole="checkbox"
-                      accessibilityState={{ checked: active }}>
-                      <View style={[styles.checkbox, active && styles.checkboxChecked]}>
-                        {active ? (
-                          <Ionicons name="checkmark" size={14} color={COLORS.white} />
-                        ) : null}
-                      </View>
-                      <Text style={styles.typeLabel}>{option.label}</Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-              {typeError ? <Text style={styles.error}>{typeError}</Text> : null}
-
-              <Text style={styles.label}>Difficulty</Text>
-              <View style={styles.chips}>
-                {DIFFICULTY_OPTIONS.map((option) => {
-                  const active = difficulty === option.value;
-                  return (
-                    <TouchableOpacity
-                      key={option.value}
-                      style={[styles.chip, active && styles.chipActive]}
-                      onPress={() => setDifficulty(option.value)}>
-                      <Text style={[styles.chipLabel, active && styles.chipLabelActive]}>
-                        {option.label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-
-              <Text style={styles.label}>Number of questions</Text>
-              <View style={styles.stepper}>
-                <TouchableOpacity
-                  style={styles.stepBtn}
-                  onPress={() => setNumberOfQuestions((n) => Math.max(1, n - 1))}>
-                  <Text style={styles.stepLabel}>-</Text>
-                </TouchableOpacity>
+              contentContainerStyle={styles.content}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
+              automaticallyAdjustKeyboardInsets={false}
+              showsVerticalScrollIndicator={false}>
+              <View style={styles.section}>
+                <Text style={styles.label}>Prompt</Text>
                 <TextInput
-                  value={String(numberOfQuestions)}
+                  value={prompt}
                   onChangeText={(value) => {
-                    const parsed = Number.parseInt(value, 10);
-                    if (!Number.isNaN(parsed)) setNumberOfQuestions(parsed);
-                    if (value === '') setNumberOfQuestions(1);
+                    setPrompt(value);
+                    if (!isPromptInvalid(value)) setError(null);
                   }}
-                  keyboardType="number-pad"
-                  style={styles.countInput}
+                  placeholder="e.g. Object-oriented programming: classes, objects, inheritance and polymorphism"
+                  placeholderTextColor={COLORS.darkTextSecondary}
+                  multiline
+                  style={styles.prompt}
                 />
-                <TouchableOpacity
-                  style={styles.stepBtn}
-                  onPress={() => setNumberOfQuestions((n) => Math.min(50, n + 1))}>
-                  <Text style={styles.stepLabel}>+</Text>
-                </TouchableOpacity>
+                {error ? <Text style={styles.error}>{error}</Text> : null}
+              </View>
+
+              <View style={styles.section}>
+                <Text style={styles.label}>Question type</Text>
+                <View style={styles.typeList}>
+                  {QUESTION_TYPE_OPTIONS.map((option) => {
+                    const active = questionTypes.includes(option.value);
+                    return (
+                      <TouchableOpacity
+                        key={option.value}
+                        style={styles.typeRow}
+                        onPress={() => toggleType(option.value)}
+                        accessibilityRole="checkbox"
+                        accessibilityState={{ checked: active }}>
+                        <View style={[styles.checkbox, active && styles.checkboxChecked]}>
+                          {active ? (
+                            <Ionicons name="checkmark" size={16} color={COLORS.white} />
+                          ) : null}
+                        </View>
+                        <Text style={styles.typeLabel}>{option.label}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                {typeError ? <Text style={styles.error}>{typeError}</Text> : null}
+              </View>
+
+              <View style={styles.section}>
+                <Text style={styles.label}>Difficulty</Text>
+                <View style={styles.diffRow}>
+                  {DIFFICULTY_OPTIONS.map((option) => {
+                    const active = difficulty === option.value;
+                    return (
+                      <TouchableOpacity
+                        key={option.value}
+                        style={[styles.diffBtn, active && styles.diffBtnActive]}
+                        onPress={() => setDifficulty(option.value)}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: active }}>
+                        <Text style={[styles.diffLabel, active && styles.diffLabelActive]}>
+                          {option.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+
+              <View style={styles.section}>
+                <Text style={styles.label}>Number of questions</Text>
+                <View style={styles.countWrap}>
+                  <TextInput
+                    value={String(numberOfQuestions)}
+                    onChangeText={(value) => {
+                      const parsed = Number.parseInt(value, 10);
+                      if (!Number.isNaN(parsed)) setNumberOfQuestions(parsed);
+                      if (value === '') setNumberOfQuestions(1);
+                    }}
+                    keyboardType="number-pad"
+                    inputMode="numeric"
+                    style={styles.countInput}
+                    accessibilityLabel="Number of questions"
+                  />
+                  <View style={styles.countSpinner}>
+                    <TouchableOpacity
+                      style={styles.countChevron}
+                      onPress={() => setNumberOfQuestions((n) => Math.min(50, n + 1))}
+                      accessibilityRole="button"
+                      accessibilityLabel="Increase number of questions">
+                      <Ionicons name="chevron-up" size={16} color={COLORS.primary} />
+                    </TouchableOpacity>
+                    <View style={styles.countSpinnerDivider} />
+                    <TouchableOpacity
+                      style={styles.countChevron}
+                      onPress={() => setNumberOfQuestions((n) => Math.max(1, n - 1))}
+                      accessibilityRole="button"
+                      accessibilityLabel="Decrease number of questions">
+                      <Ionicons name="chevron-down" size={16} color={COLORS.primary} />
+                    </TouchableOpacity>
+                  </View>
+                </View>
               </View>
             </ScrollView>
 
@@ -231,26 +239,21 @@ export function AiQuizGeneratorModal({ visible, onClose, onGenerated }: Props) {
               </TouchableOpacity>
             </View>
           </View>
-        </View>
-      </KeyboardSafeScreen>
+      </KeyboardModalFrame>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: COLORS.background },
-  sheetWrap: {
-    flex: 1,
-    paddingHorizontal: SPACING[4],
-  },
+  screen: { flex: 1, backgroundColor: COLORS.background, paddingHorizontal: SPACING[4] },
   card: {
     flex: 1,
-    backgroundColor: COLORS.white,
-    borderRadius: 24,
+    backgroundColor: COLORS.background,
+    borderRadius: 28,
     borderWidth: 1,
     borderColor: COLORS.cardBorder,
     overflow: 'hidden',
-    ...SHADOWS.raised,
+    ...SHADOWS.card,
   },
   header: {
     flexDirection: 'row',
@@ -281,8 +284,9 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.cardBorder,
   },
   body: { flex: 1 },
-  content: { padding: SPACING[5], gap: SPACING[3] },
-  label: { color: COLORS.text, fontWeight: FONT_WEIGHTS.semibold, marginTop: SPACING[2] },
+  content: { padding: SPACING[5], gap: SPACING[6] },
+  section: { gap: SPACING[3] },
+  label: { color: COLORS.text, fontWeight: FONT_WEIGHTS.semibold },
   prompt: {
     minHeight: 110,
     borderWidth: 1,
@@ -292,6 +296,8 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
     color: COLORS.text,
     backgroundColor: COLORS.white,
+    fontSize: 14,
+    lineHeight: 22,
   },
   error: { color: COLORS.dangerText },
   typeList: { gap: SPACING[2] },
@@ -302,14 +308,14 @@ const styles = StyleSheet.create({
     minHeight: 44,
     paddingHorizontal: SPACING[4],
     paddingVertical: SPACING[3],
-    borderRadius: 999,
+    borderRadius: RADIUS.full,
     backgroundColor: COLORS.background,
     borderWidth: 1,
     borderColor: COLORS.cardBorder,
   },
   checkbox: {
-    width: 20,
-    height: 20,
+    width: 22,
+    height: 22,
     borderRadius: 4,
     borderWidth: 1.5,
     borderColor: COLORS.primary,
@@ -322,37 +328,64 @@ const styles = StyleSheet.create({
     borderColor: COLORS.primary,
   },
   typeLabel: { color: COLORS.text, fontWeight: FONT_WEIGHTS.medium, fontSize: 14 },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING[2] },
-  chip: {
+  diffRow: { flexDirection: 'row', gap: 12 },
+  diffBtn: {
+    flex: 1,
+    height: 56,
+    borderRadius: RADIUS.full,
     borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 999,
-    paddingHorizontal: SPACING[3],
-    paddingVertical: SPACING[2],
+    borderColor: COLORS.cardBorder,
     backgroundColor: COLORS.white,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: SPACING[2],
   },
-  chipActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
-  chipLabel: { color: COLORS.text },
-  chipLabelActive: { color: COLORS.white, fontWeight: FONT_WEIGHTS.semibold },
-  stepper: { flexDirection: 'row', alignItems: 'center', gap: SPACING[3] },
-  stepBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
+  diffBtnActive: {
     backgroundColor: COLORS.primary,
+    borderColor: COLORS.primary,
+  },
+  diffLabel: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: FONT_WEIGHTS.medium,
+  },
+  diffLabelActive: {
+    color: COLORS.white,
+    fontWeight: FONT_WEIGHTS.bold,
+  },
+  countWrap: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    height: 56,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    backgroundColor: COLORS.white,
+    overflow: 'hidden',
+  },
+  countInput: {
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: SPACING[4],
+    color: COLORS.text,
+    fontSize: 16,
+    textAlign: 'left',
+    paddingVertical: 0,
+  },
+  countSpinner: {
+    width: 44,
+    backgroundColor: COLORS.surfaceMuted,
+    borderLeftWidth: 1,
+    borderLeftColor: COLORS.cardBorder,
+  },
+  countChevron: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  stepLabel: { color: COLORS.white, fontSize: 22, fontWeight: FONT_WEIGHTS.bold },
-  countInput: {
-    width: 72,
-    minHeight: 44,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 12,
-    textAlign: 'center',
-    color: COLORS.text,
-    backgroundColor: COLORS.white,
+  countSpinnerDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: COLORS.cardBorder,
   },
   footer: {
     paddingHorizontal: SPACING[5],

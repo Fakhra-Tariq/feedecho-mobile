@@ -82,33 +82,132 @@ export function spaceRaceQuestionId(question: any, index: number) {
   return `q${index}`;
 }
 
-/** Same alias set Web uses so lock nodes match q0 / q-0 / id variants. */
+function addQuestionKey(ids: string[], value: unknown) {
+  if (value === undefined || value === null) return;
+  const text = String(value).trim();
+  if (!text || ids.includes(text)) return;
+  ids.push(text);
+  const dashed = text.match(/^q-(\d+)$/i);
+  const undashed = text.match(/^q(\d+)$/i);
+  if (dashed) addQuestionKey(ids, `q${dashed[1]}`);
+  if (undashed) addQuestionKey(ids, `q-${undashed[1]}`);
+}
+
+/** Same alias set Web uses (includes display index). Do not use this to pick the live lock. */
 export function spaceRaceQuestionIdAliases(question: any, index: number) {
   const ids: string[] = [];
-  const add = (value: unknown) => {
-    if (value === undefined || value === null) return;
-    const text = String(value).trim();
-    if (!text || ids.includes(text)) return;
-    ids.push(text);
-    const dashed = text.match(/^q-(\d+)$/i);
-    const undashed = text.match(/^q(\d+)$/i);
-    if (dashed) add(`q${dashed[1]}`);
-    if (undashed) add(`q-${undashed[1]}`);
-  };
-  add(spaceRaceQuestionId(question, index));
-  add(question?.id);
-  add(question?.questionId);
-  add(question?._id);
+  addQuestionKey(ids, spaceRaceQuestionId(question, index));
+  addQuestionKey(ids, question?.id);
+  addQuestionKey(ids, question?.questionId);
+  addQuestionKey(ids, question?._id);
   if (Number.isInteger(index)) {
-    add(`q${index}`);
-    add(`q-${index}`);
-    add(String(index));
+    addQuestionKey(ids, `q${index}`);
+    addQuestionKey(ids, `q-${index}`);
+    addQuestionKey(ids, String(index));
+  }
+  return ids;
+}
+
+/**
+ * Keys that belong to THIS question's RTDB node.
+ * Display-index aliases (`1`, `q1`) are omitted unless they are this question's canonical id,
+ * so Q2 cannot read Q1's `question_1` node.
+ */
+export function spaceRaceLiveQuestionKeys(question: any, index: number) {
+  const canonical = spaceRaceQuestionId(question, index);
+  const ids: string[] = [];
+  addQuestionKey(ids, canonical);
+  addQuestionKey(ids, question?.id);
+  addQuestionKey(ids, question?.questionId);
+  addQuestionKey(ids, question?._id);
+  if (Number.isInteger(index)) {
+    const qKey = `q${index}`;
+    const qDash = `q-${index}`;
+    const indexKey = String(index);
+    if (canonical === qKey || canonical === qDash) {
+      addQuestionKey(ids, qKey);
+      addQuestionKey(ids, qDash);
+    } else if (canonical === indexKey) {
+      addQuestionKey(ids, indexKey);
+    }
   }
   return ids;
 }
 
 export function isSubmittedLockNode(node: any) {
   return Boolean(node) && (node.submitted === true || node.submitted === 'true');
+}
+
+export function teamNodeAnswer(node: any) {
+  if (!node) return '';
+  const value = node.selectedOption ?? node.answer;
+  if (value == null) return '';
+  return String(value);
+}
+
+function optionIdentityValues(option: any): string[] {
+  if (option == null) return [];
+  if (typeof option === 'string' || typeof option === 'number') return [String(option)];
+  const values = [option.text, option.label, option.value, option.id, option.optionId]
+    .filter((value) => value != null && String(value).trim() !== '')
+    .map((value) => String(value));
+  return Array.from(new Set(values));
+}
+
+/** Match a stored team answer to an option by id/text/value — never by shuffle index. */
+export function optionMatchesSelection(option: any, selected: unknown) {
+  if (selected == null || String(selected).trim() === '') return false;
+  const sel = String(selected).trim();
+  return optionIdentityValues(option).some((value) => value === sel || value === String(selected));
+}
+
+export function questionOptionValues(question: any): string[] {
+  const options = Array.isArray(question?.options) ? question.options : [];
+  const values: string[] = [];
+  options.forEach((option: any) => {
+    optionIdentityValues(option).forEach((value) => {
+      if (!values.includes(value)) values.push(value);
+    });
+  });
+  return values;
+}
+
+/**
+ * Live nodes that belong to this question. Canonical/id keys first; if those miss
+ * (Web wrote a different alias), fall back to a unique option-text match.
+ */
+export function findLiveQuestionNodes(
+  map: Record<string, any> | null | undefined,
+  question: any,
+  index: number
+) {
+  if (!map || typeof map !== 'object') return [] as any[];
+  const keys = spaceRaceLiveQuestionKeys(question, index);
+  const nodes: any[] = [];
+  const seen = new Set<any>();
+  keys.forEach((id) => {
+    const node = map[`question_${id}`];
+    if (node && !seen.has(node)) {
+      seen.add(node);
+      nodes.push(node);
+    }
+  });
+  const hasUsableAnswer = nodes.some((node) => teamNodeAnswer(node).trim() !== '');
+  if (hasUsableAnswer) return nodes;
+
+  const optionValues = new Set(questionOptionValues(question));
+  if (optionValues.size === 0) return nodes;
+  const matches: any[] = [];
+  Object.entries(map).forEach(([key, node]) => {
+    if (!node || !String(key).startsWith('question_')) return;
+    const answer = teamNodeAnswer(node);
+    if (answer && optionValues.has(answer) && !seen.has(node)) {
+      seen.add(node);
+      matches.push(node);
+    }
+  });
+  if (matches.length === 1) return [...nodes, matches[0]];
+  return nodes;
 }
 
 export function teamScoreFromNode(node: any): number {

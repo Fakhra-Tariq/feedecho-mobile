@@ -46,6 +46,56 @@ export function teamQuizCacheKey(teamId?: number | string | null) {
   return `spaceRaceQuiz_team_${teamId ?? 'default'}`;
 }
 
+/** Same flags as Web GET /space-races/:id `launchSettings.spaceRaceSettings`. */
+export type SpaceRaceQuizOptions = {
+  shuffleQuestions: boolean;
+  shuffleAnswers: boolean;
+  showQuestionFeedback: boolean;
+  showFinalScore: boolean;
+};
+
+export const SPACE_RACE_QUIZ_OPTION_DEFAULTS: SpaceRaceQuizOptions = {
+  shuffleQuestions: false,
+  shuffleAnswers: false,
+  showQuestionFeedback: false,
+  showFinalScore: true,
+};
+
+function pickBool(sources: unknown[], key: keyof SpaceRaceQuizOptions, fallback: boolean) {
+  for (let i = sources.length - 1; i >= 0; i -= 1) {
+    const src = sources[i] as Record<string, unknown> | null | undefined;
+    if (src && typeof src === 'object' && src[key] !== undefined && src[key] !== null) {
+      return Boolean(src[key]);
+    }
+  }
+  return fallback;
+}
+
+/**
+ * Race.settings wins, then quiz.launchSettings.spaceRaceSettings, then quiz.spaceRaceSettings.
+ * Defaults match Web server attach: shuffle/feedback false, showFinalScore true.
+ */
+export function readSpaceRaceQuizOptions(
+  quizData?: any,
+  raceSettings?: any
+): SpaceRaceQuizOptions {
+  const sources = [
+    quizData?.spaceRaceSettings,
+    quizData?.launchSettings?.spaceRaceSettings,
+    raceSettings,
+  ];
+  return {
+    shuffleQuestions: pickBool(sources, 'shuffleQuestions', SPACE_RACE_QUIZ_OPTION_DEFAULTS.shuffleQuestions),
+    shuffleAnswers: pickBool(sources, 'shuffleAnswers', SPACE_RACE_QUIZ_OPTION_DEFAULTS.shuffleAnswers),
+    showQuestionFeedback: pickBool(
+      sources,
+      'showQuestionFeedback',
+      SPACE_RACE_QUIZ_OPTION_DEFAULTS.showQuestionFeedback
+    ),
+    showFinalScore: pickBool(sources, 'showFinalScore', SPACE_RACE_QUIZ_OPTION_DEFAULTS.showFinalScore),
+  };
+}
+
 export function bootstrapSpaceRaceQuiz(input: {
   quizData: any;
   raceId: string;
@@ -55,11 +105,7 @@ export function bootstrapSpaceRaceQuiz(input: {
   skipShuffle?: boolean;
 }) {
   const { quizData, raceId, teamId, participantId, raceSettings, skipShuffle } = input;
-  const settings =
-    raceSettings ||
-    quizData?.launchSettings?.spaceRaceSettings ||
-    quizData?.spaceRaceSettings ||
-    {};
+  const settings = readSpaceRaceQuizOptions(quizData, raceSettings);
 
   let questions = normalizeQuestionList(quizData?.questions);
 

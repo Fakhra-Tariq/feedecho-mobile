@@ -38,6 +38,46 @@ export function parseOptionalMinutes(value: number | string | null | undefined) 
   return Math.min(QUIZ_TIME_MAX_MINUTES, parsed);
 }
 
+/** Quizzes just POSTed/PUTted this session — GET /quizzes can lag the createdBy index. */
+const savedQuizCache = new Map<string, HostQuiz>();
+
+function asHostQuiz(quiz: HostQuiz, fallbackId = ''): HostQuiz {
+  return {
+    ...quiz,
+    id: String(quiz.id || fallbackId),
+    type: normalizeQuizTypeLabel(quiz.type),
+  };
+}
+
+export function rememberSavedQuiz(quiz: HostQuiz | null | undefined) {
+  if (!quiz?.id) return;
+  savedQuizCache.set(String(quiz.id), asHostQuiz(quiz));
+}
+
+export function forgetSavedQuiz(id: string) {
+  savedQuizCache.delete(id);
+}
+
+export function mergeTeacherQuizLists(...lists: HostQuiz[][]) {
+  const map = new Map<string, HostQuiz>();
+  lists.flat().forEach((quiz) => {
+    if (!quiz) return;
+    const id = String(quiz.id || '');
+    if (!id) return;
+    const next = asHostQuiz(quiz, id);
+    const prev = map.get(id);
+    map.set(id, prev ? { ...prev, ...next, id } : next);
+  });
+  return Array.from(map.values())
+    .filter((quiz) => {
+      if (quiz.deletedAt) return false;
+      return String(quiz.status || '').toLowerCase() !== 'ended';
+    })
+    .sort((a, b) =>
+      String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || ''))
+    );
+}
+
 export function subscribeTeacherQuizzes(
   teacherId: string,
   onChange: (quizzes: HostQuiz[]) => void,
@@ -54,7 +94,7 @@ export function subscribeTeacherQuizzes(
         Object.entries(snap.val() || {}).forEach(([id, value]) => {
           if (!value || typeof value !== 'object') return;
           const quiz = value as HostQuiz;
-          if (String(quiz.createdBy || '') !== teacherId) return;
+          if (String(quiz.createdBy || '').trim() !== String(teacherId || '').trim()) return;
           if (quiz.deletedAt) return;
           const status = String(quiz.status || '').toLowerCase();
           if (status === 'ended') return;
@@ -65,36 +105,17 @@ export function subscribeTeacherQuizzes(
           });
         });
       }
-      rows.sort((a, b) =>
-        String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || ''))
-      );
-      onChange(rows);
+      onChange(mergeTeacherQuizLists(rows, Array.from(savedQuizCache.values())));
     },
     (error) => onError?.(error)
   );
 }
 
-/** Same source Web Quiz Library uses: GET /api/quizzes (Admin filters by createdBy). */
-export async function listTeacherQuizzes(teacherId?: string) {
+/** Same source Web Quiz Library uses: GET /api/quizzes (Admin already filters by token uid). */
+export async function listTeacherQuizzes(_teacherId?: string) {
   const response = await apiRequest<{ success?: boolean; data?: HostQuiz[] }>('/quizzes');
   const rows = Array.isArray(response.data) ? response.data : [];
-  return rows
-    .filter((quiz) => {
-      if (!quiz || typeof quiz !== 'object') return false;
-      if (teacherId && String(quiz.createdBy || '') !== teacherId) return false;
-      if (quiz.deletedAt) return false;
-      const status = String(quiz.status || '').toLowerCase();
-      if (status === 'ended') return false;
-      return true;
-    })
-    .map((quiz) => ({
-      ...quiz,
-      id: String(quiz.id || ''),
-      type: normalizeQuizTypeLabel(quiz.type),
-    }))
-    .sort((a, b) =>
-      String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || ''))
-    );
+  return mergeTeacherQuizLists(rows, Array.from(savedQuizCache.values()));
 }
 
 export async function createQuiz(payload: Record<string, unknown>) {
@@ -105,9 +126,10 @@ export async function createQuiz(payload: Record<string, unknown>) {
       createdAt: payload.createdAt || new Date().toISOString(),
     },
   });
-  if (!response.success || !response.data) {
+  if (!response.success || !response.data?.id) {
     throw new Error('Failed to create quiz');
   }
+  rememberSavedQuiz(response.data);
   return response.data;
 }
 
@@ -116,9 +138,10 @@ export async function updateQuiz(id: string, payload: Record<string, unknown>) {
     method: 'PUT',
     body: payload,
   });
-  if (!response.success || !response.data) {
+  if (!response.success || !response.data?.id) {
     throw new Error('Failed to update quiz');
   }
+  rememberSavedQuiz(response.data);
   return response.data;
 }
 
@@ -145,6 +168,7 @@ export async function deleteQuiz(id: string) {
   if (!response.success) {
     throw new Error(response.error || 'Failed to delete quiz');
   }
+  forgetSavedQuiz(id);
 }
 
 export async function launchQuiz(

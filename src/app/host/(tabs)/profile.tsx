@@ -19,6 +19,7 @@ import { cleanErrorMessage } from '@/lib/activeActivity';
 import {
   KEYBOARD_BOTTOM_GAP,
   KEYBOARD_SCROLL_PROPS,
+  KeyboardModalFrame,
   KeyboardSafeScreen,
 } from '@/components/KeyboardSafeScreen';
 import { AppButton, AppCard } from '@/components/ui';
@@ -434,18 +435,21 @@ export default function HostProfileScreen() {
       </ScrollView>
 
       <Modal visible={editOpen} animationType="slide" transparent onRequestClose={() => setEditOpen(false)}>
-        <View style={styles.modalOverlay}>
-          <KeyboardSafeScreen
-            variant="modal"
-            style={styles.modalCard}
-            contentContainerStyle={{ paddingBottom: KEYBOARD_BOTTOM_GAP }}>
+        <KeyboardModalFrame style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
               <Text style={styles.modalTitle}>Edit profile</Text>
-              <Field label="Full name" value={fullName} onChangeText={setFullName} />
-              <Field label="Bio" value={bio} onChangeText={setBio} multiline />
-              <Field label="School" value={school} onChangeText={setSchool} />
-              <Field label="Subject" value={subject} onChangeText={setSubject} />
-              <Field label="Experience" value={experience} onChangeText={setExperience} />
-              <Field label="Location" value={location} onChangeText={setLocation} />
+              <ScrollView
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+                style={styles.modalFields}
+                contentContainerStyle={{ flexGrow: 0 }}>
+                <Field label="Full name" value={fullName} onChangeText={setFullName} />
+                <Field label="Bio" value={bio} onChangeText={setBio} multiline />
+                <Field label="School" value={school} onChangeText={setSchool} />
+                <Field label="Subject" value={subject} onChangeText={setSubject} />
+                <Field label="Experience" value={experience} onChangeText={setExperience} />
+                <Field label="Location" value={location} onChangeText={setLocation} />
+              </ScrollView>
               <AppButton
                 label={saving ? 'Saving...' : 'Save'}
                 loading={saving}
@@ -457,8 +461,8 @@ export default function HostProfileScreen() {
                 onPress={() => setEditOpen(false)}
                 style={{ marginTop: SPACING[2] }}
               />
-          </KeyboardSafeScreen>
-        </View>
+          </View>
+        </KeyboardModalFrame>
       </Modal>
 
       <Modal
@@ -466,32 +470,35 @@ export default function HostProfileScreen() {
         animationType="slide"
         transparent
         onRequestClose={() => setPasswordOpen(false)}>
-        <View style={styles.modalOverlay}>
-          <KeyboardSafeScreen
-            variant="modal"
-            style={styles.modalCard}
-            contentContainerStyle={{ paddingBottom: KEYBOARD_BOTTOM_GAP }}>
+        <KeyboardModalFrame style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
               <Text style={styles.modalTitle}>Change password</Text>
-              <Field
-                label="Current password"
-                value={currentPassword}
-                onChangeText={setCurrentPassword}
-                secureTextEntry
-              />
-              <Field
-                label="New password"
-                value={newPassword}
-                onChangeText={setNewPassword}
-                secureTextEntry
-              />
-              <Field
-                label="Confirm password"
-                value={confirmPassword}
-                onChangeText={setConfirmPassword}
-                secureTextEntry
-              />
-              {passwordError ? <Text style={styles.error}>{passwordError}</Text> : null}
-              {passwordSuccess ? <Text style={styles.success}>{passwordSuccess}</Text> : null}
+              <ScrollView
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+                style={styles.modalFields}
+                contentContainerStyle={{ flexGrow: 0 }}>
+                <Field
+                  label="Current password"
+                  value={currentPassword}
+                  onChangeText={setCurrentPassword}
+                  secureTextEntry
+                />
+                <Field
+                  label="New password"
+                  value={newPassword}
+                  onChangeText={setNewPassword}
+                  secureTextEntry
+                />
+                <Field
+                  label="Confirm password"
+                  value={confirmPassword}
+                  onChangeText={setConfirmPassword}
+                  secureTextEntry
+                />
+                {passwordError ? <Text style={styles.error}>{passwordError}</Text> : null}
+                {passwordSuccess ? <Text style={styles.success}>{passwordSuccess}</Text> : null}
+              </ScrollView>
               <AppButton
                 label={passwordSaving ? 'Updating...' : 'Update password'}
                 loading={passwordSaving}
@@ -503,8 +510,8 @@ export default function HostProfileScreen() {
                 onPress={() => setPasswordOpen(false)}
                 style={{ marginTop: SPACING[2] }}
               />
-          </KeyboardSafeScreen>
-        </View>
+          </View>
+        </KeyboardModalFrame>
       </Modal>
     </KeyboardSafeScreen>
   );
@@ -695,14 +702,21 @@ const styles = StyleSheet.create({
   modalOverlay: {
     flex: 1,
     backgroundColor: COLORS.overlay,
-    justifyContent: 'center',
-    padding: SPACING[6],
+    paddingHorizontal: SPACING[6],
   },
   modalCard: {
+    width: '100%',
+    maxWidth: 400,
+    maxHeight: '100%',
+    alignSelf: 'center',
     backgroundColor: COLORS.white,
     borderRadius: RADIUS.lg,
     padding: SPACING[5],
-    maxHeight: '90%',
+    flexShrink: 1,
+  },
+  modalFields: {
+    flexShrink: 1,
+    minHeight: 0,
   },
   modalTitle: { ...TYPE.title, marginBottom: SPACING[4] },
   input: {

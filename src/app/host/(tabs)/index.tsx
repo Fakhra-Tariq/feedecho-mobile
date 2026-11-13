@@ -20,11 +20,6 @@ import { CreateSessionModal } from '@/components/CreateSessionModal';
 import { AppButton, AppCard, PressableCard } from '@/components/ui';
 import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING, TYPE } from '@/constants/theme';
 import { useHostSessions } from '@/context/HostSessionContext';
-import {
-  formatActivityLine,
-  parseActivityHistory,
-  type HostSession,
-} from '@/lib/hostSessions';
 
 const ACTIVITIES = [
   {
@@ -67,57 +62,151 @@ function formatRelativeTime(timestamp?: string) {
   return `${days} d ago`;
 }
 
-function activityIconName(type?: string): keyof typeof Ionicons.glyphMap {
-  const kind = String(type || '')
-    .toLowerCase()
-    .replace(/_/g, '');
-  if (kind === 'quiz') return 'help-circle-outline';
-  if (kind === 'spacerace') return 'rocket-outline';
-  if (kind === 'exitticket') return 'document-text-outline';
-  if (kind === 'livechat' || kind === 'anonymouschat') return 'chatbubbles-outline';
-  if (kind === 'session') return 'calendar-outline';
-  return 'pulse-outline';
-}
+/** Same event types and description templates as Web HostDashboard `activityMeta`. */
+type WorkspaceActivityType = 'quiz' | 'exitTicket' | 'spaceRace' | 'anonymousChat' | 'session';
 
 type RecentItem = {
   id: string;
-  type?: string;
+  type: WorkspaceActivityType;
   title: string;
-  subtitle?: string;
+  status?: string;
   timestamp: string;
 };
 
-/**
- * Read-only feed from existing session `activityHistory` (already loaded via
- * HostSessionContext / RTDB `sessions`). Web Explore uses localStorage
- * `activityLog` instead — Mobile has no equivalent store.
- */
-function buildRecentActivity(sessions: HostSession[]): RecentItem[] {
+function rowStamp(row: Record<string, unknown> | null | undefined) {
+  return (
+    String(row?.updatedAt || '') ||
+    String(row?.lastActivity || '') ||
+    String(row?.endedAt || '') ||
+    String(row?.startedAt || '') ||
+    String(row?.launchedAt || '') ||
+    String(row?.createdAt || '')
+  );
+}
+
+function prettyStatus(raw: unknown, fallback: string) {
+  const text = String(raw ?? '').trim();
+  if (!text) return fallback;
+  const kind = text.toLowerCase();
+  if (['ended', 'completed', 'finished', 'inactive'].includes(kind)) return 'Ended';
+  if (kind === 'archived') return 'Archived';
+  if (kind === 'draft') return 'Draft';
+  if (['active', 'ready', 'live', 'started', 'running', 'launched'].includes(kind)) {
+    return fallback === 'Active' ? 'Active' : 'Ready';
+  }
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function activityDescription(item: RecentItem) {
+  if (item.type === 'quiz') return `Quiz marked ${item.status || 'Ready'}`;
+  if (item.type === 'exitTicket') return `Exit ticket ${item.status || 'Ready'}`;
+  if (item.type === 'spaceRace') return `Space race ${item.status || 'Ready'}`;
+  if (item.type === 'anonymousChat') return `Anonymous chat ${item.status || 'Active'}`;
+  return 'Workspace activity recorded';
+}
+
+function activityIcon(type: WorkspaceActivityType): {
+  name: keyof typeof Ionicons.glyphMap;
+  color: string;
+} {
+  if (type === 'quiz') return { name: 'play-circle-outline', color: COLORS.primary };
+  if (type === 'spaceRace') return { name: 'trophy-outline', color: COLORS.warmGold };
+  if (type === 'exitTicket') return { name: 'clipboard-outline', color: COLORS.warning };
+  if (type === 'anonymousChat') return { name: 'chatbubble-outline', color: COLORS.primary };
+  return { name: 'pulse-outline', color: COLORS.iconMuted };
+}
+
+function buildRecentActivity(input: {
+  sessions: { id?: string; sessionName?: string; createdAt?: string; teacherId?: string }[];
+  quizzes: { id?: string; title?: string; status?: string; createdAt?: string; updatedAt?: string }[];
+  races: Record<string, unknown>[];
+  tickets: Record<string, unknown>[];
+  chats: Record<string, unknown>[];
+}): RecentItem[] {
   const items: RecentItem[] = [];
-  sessions.forEach((session) => {
-    const sessionLabel = String(session.sessionName || '').trim();
-    parseActivityHistory(session).forEach((entry, index) => {
-      const timestamp = String(entry.launchedAt || '').trim();
-      if (!timestamp) return;
-      items.push({
-        id: String(entry.id || `${session.id}-${timestamp}-${entry.type || index}`),
-        type: entry.type,
-        title: formatActivityLine(entry),
-        // Only show a real session name — never interpolate undefined (Web bug:
-        // `Anonymous chat ${status}` when status is missing).
-        subtitle: sessionLabel || undefined,
-        timestamp,
-      });
+
+  input.sessions.forEach((session) => {
+    const title = String(session.sessionName || '').trim();
+    const timestamp = String(session.createdAt || '').trim();
+    if (!title || !timestamp) return;
+    items.push({
+      id: `session-${session.id || timestamp}`,
+      type: 'session',
+      title,
+      timestamp,
     });
   });
+
+  input.quizzes.forEach((quiz) => {
+    const title = String(quiz.title || '').trim();
+    const timestamp = rowStamp(quiz as Record<string, unknown>);
+    if (!title || !timestamp) return;
+    items.push({
+      id: `quiz-${quiz.id || timestamp}`,
+      type: 'quiz',
+      title,
+      status: prettyStatus(quiz.status, 'Ready'),
+      timestamp,
+    });
+  });
+
+  input.races.forEach((race) => {
+    const title = String(race.title || '').trim();
+    const timestamp = rowStamp(race);
+    if (!title || !timestamp) return;
+    items.push({
+      id: `spaceRace-${String(race.id || race.raceId || timestamp)}`,
+      type: 'spaceRace',
+      title,
+      status: prettyStatus(race.status, 'Ready'),
+      timestamp,
+    });
+  });
+
+  input.tickets.forEach((ticket) => {
+    const title = String(ticket.title || '').trim();
+    const timestamp = rowStamp(ticket);
+    if (!title || !timestamp) return;
+    items.push({
+      id: `exitTicket-${String(ticket.id || timestamp)}`,
+      type: 'exitTicket',
+      title,
+      status: prettyStatus(ticket.status, 'Ready'),
+      timestamp,
+    });
+  });
+
+  input.chats.forEach((chat) => {
+    const title = String(chat.title || '').trim();
+    const timestamp = rowStamp(chat);
+    if (!title || !timestamp) return;
+    const ended = chat.isActive === false || String(chat.status || '').toLowerCase() === 'ended';
+    items.push({
+      id: `anonymousChat-${String(chat.id || timestamp)}`,
+      type: 'anonymousChat',
+      title,
+      status: ended ? 'Ended' : prettyStatus(chat.status, 'Active'),
+      timestamp,
+    });
+  });
+
   return items
     .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
     .slice(0, 6);
 }
 
 export default function ExploreScreen() {
-  const { activeSession, sessions, loading: sessionsLoading, createSession, endSession } =
-    useHostSessions();
+  const {
+    activeSession,
+    sessions,
+    quizzes,
+    liveChats,
+    liveRaces,
+    liveTickets,
+    loading: sessionsLoading,
+    createSession,
+    endSession,
+  } = useHostSessions();
   const [showCreate, setShowCreate] = useState(false);
   const [sessionName, setSessionName] = useState('');
   const [creating, setCreating] = useState(false);
@@ -127,7 +216,17 @@ export default function ExploreScreen() {
   const [ending, setEnding] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
 
-  const recentActivity = useMemo(() => buildRecentActivity(sessions), [sessions]);
+  const recentActivity = useMemo(
+    () =>
+      buildRecentActivity({
+        sessions,
+        quizzes,
+        races: liveRaces as Record<string, unknown>[],
+        tickets: liveTickets as Record<string, unknown>[],
+        chats: liveChats as Record<string, unknown>[],
+      }),
+    [sessions, quizzes, liveRaces, liveTickets, liveChats]
+  );
 
   const onCreatePress = () => {
     setShowCreate(true);
@@ -286,18 +385,21 @@ export default function ExploreScreen() {
           <Text style={styles.recentEmpty}>No recent activity yet.</Text>
         ) : (
           <View style={styles.recentList}>
-            {recentActivity.map((item) => (
-              <View key={item.id} style={styles.recentRow}>
-                <Ionicons name={activityIconName(item.type)} size={18} color={COLORS.plum} />
-                <View style={styles.recentRowCopy}>
-                  <Text style={styles.recentRowTitle}>{item.title}</Text>
-                  {item.subtitle ? (
-                    <Text style={styles.recentRowSubtitle}>{item.subtitle}</Text>
-                  ) : null}
-                  <Text style={styles.recentRowTime}>{formatRelativeTime(item.timestamp)}</Text>
+            {recentActivity.map((item) => {
+              const icon = activityIcon(item.type);
+              return (
+                <View key={item.id} style={styles.recentRow}>
+                  <Ionicons name={icon.name} size={24} color={icon.color} />
+                  <View style={styles.recentRowCopy}>
+                    <Text style={styles.recentRowTitle} numberOfLines={2}>
+                      {item.title}
+                    </Text>
+                    <Text style={styles.recentRowSubtitle}>{activityDescription(item)}</Text>
+                    <Text style={styles.recentRowTime}>{formatRelativeTime(item.timestamp)}</Text>
+                  </View>
                 </View>
-              </View>
-            ))}
+              );
+            })}
           </View>
         )}
       </View>
@@ -501,33 +603,35 @@ const styles = StyleSheet.create({
   activityBody: { ...TYPE.caption },
   recentCard: {
     backgroundColor: COLORS.white,
-    borderRadius: 20,
+    borderRadius: 28,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#E8DFE6',
-    padding: 14,
+    borderColor: COLORS.cardBorder,
+    padding: 16,
+    ...SHADOWS.raised,
   },
   recentHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 12,
+    marginBottom: 8,
   },
   recentHeaderCopy: { flex: 1, minWidth: 0 },
   recentTitle: {
-    fontSize: 18,
-    fontWeight: FONT_WEIGHTS.semibold,
-    color: '#2B1F27',
+    fontSize: 20,
+    fontWeight: FONT_WEIGHTS.bold,
+    color: COLORS.deepIndigo,
   },
   recentSubtitle: {
-    marginTop: 2,
-    fontSize: 12,
-    color: '#5F5460',
+    marginTop: 4,
+    fontSize: 13,
+    color: COLORS.inkSecondary,
   },
   recentHeaderIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#6B3A5C',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -541,33 +645,33 @@ const styles = StyleSheet.create({
   },
   recentList: {
     marginTop: 12,
-    gap: 10,
+    gap: 12,
   },
   recentRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: 10,
-    borderWidth: 1,
-    borderColor: '#ECE3EA',
-    borderRadius: 12,
-    padding: 12,
+    gap: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.rowBorder,
+    borderRadius: 20,
+    padding: 14,
     backgroundColor: COLORS.white,
   },
   recentRowCopy: { flex: 1, minWidth: 0 },
   recentRowTitle: {
     fontSize: 14,
-    fontWeight: FONT_WEIGHTS.medium,
-    color: '#2B1F27',
+    fontWeight: FONT_WEIGHTS.bold,
+    color: COLORS.deepIndigo,
   },
   recentRowSubtitle: {
     marginTop: 2,
-    fontSize: 12,
-    color: '#5F5460',
+    fontSize: 13,
+    color: COLORS.text,
   },
   recentRowTime: {
-    marginTop: 4,
-    fontSize: 11,
-    color: '#8A7F89',
+    marginTop: 8,
+    fontSize: 12,
+    color: COLORS.iconMuted,
   },
   overlay: {
     flex: 1,

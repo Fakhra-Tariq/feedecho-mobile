@@ -23,8 +23,7 @@ import { HostFilterChips, HostSearchBar } from '@/components/HostListToolbar';
 import { EmptyState } from '@/components/ui';
 import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
-import { useHostSessions } from '@/context/HostSessionContext';
-import { getSessionActivityLabel } from '@/lib/sessionActivityLabel';
+import { useHostSessions, useSessionActivityLabel } from '@/context/HostSessionContext';
 import {
   cleanErrorMessage,
   showLaunchFailureAlert,
@@ -72,7 +71,8 @@ const HOW_IT_WORKS_STEPS = [
 export default function ExitTicketLibraryScreen() {
   const insets = useSafeAreaInsets();
   const { profile } = useAuth();
-  const { activeSession, quizzes } = useHostSessions();
+  const { activeSession } = useHostSessions();
+  const activityStatus = useSessionActivityLabel();
   const uid = profile?.uid || '';
 
   const { list: liveTickets, loading: liveLoading } = useRtdbList(uid ? 'exit_tickets' : null, {
@@ -223,7 +223,7 @@ export default function ExitTicketLibraryScreen() {
   }, [activeTicket?.id]);
 
   const sessionCode = activeSession?.sessionCode || '—';
-  const activityStatus = getSessionActivityLabel(activeSession?.currentActivity, quizzes);
+  const listPadBottom = TAB_BAR_CONTENT_HEIGHT + insets.bottom + SPACING[4];
 
   const copyCode = async (code: string, ticketId: string) => {
     await Clipboard.setStringAsync(code);
@@ -309,8 +309,8 @@ export default function ExitTicketLibraryScreen() {
     }
   };
 
-  return (
-    <KeyboardSafeScreen scroll={false} style={styles.screen}>
+  const listHeader = (
+    <View style={styles.listHeader}>
       <View style={styles.sessionBanner} accessibilityRole="text">
         <Ionicons
           name={activeSession ? 'checkmark-circle' : 'alert-circle-outline'}
@@ -391,7 +391,11 @@ export default function ExitTicketLibraryScreen() {
         accessibilityLabel="Search exit tickets"
         style={styles.searchWrap}
       />
+    </View>
+  );
 
+  return (
+    <KeyboardSafeScreen scroll={false} style={styles.screen}>
       {loading ? (
         <View style={styles.centered}>
           <ActivityIndicator color={COLORS.primary} />
@@ -403,10 +407,9 @@ export default function ExitTicketLibraryScreen() {
           extraData={`${activeTicket?.id || ''}:${copiedId || ''}`}
           keyExtractor={(item) => item.id}
           {...KEYBOARD_SCROLL_PROPS}
-          contentContainerStyle={[
-            styles.list,
-            { paddingBottom: TAB_BAR_CONTENT_HEIGHT + insets.bottom + SPACING[4] },
-          ]}
+          keyboardShouldPersistTaps="handled"
+          ListHeaderComponent={listHeader}
+          contentContainerStyle={[styles.list, { paddingBottom: listPadBottom }]}
           ListEmptyComponent={
             <EmptyState
               icon="document-text-outline"
@@ -496,7 +499,7 @@ export default function ExitTicketLibraryScreen() {
                       />
                       <CardButton
                         label="Launch"
-                        icon="rocket-outline"
+                        icon="play-outline"
                         primary
                         onPress={() => onLaunch(item)}
                         accessibilityLabel="Launch exit ticket"
@@ -750,8 +753,10 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
     marginTop: 12,
   },
+  listHeader: {
+    marginBottom: 16,
+  },
   list: {
-    paddingTop: 16,
     gap: 12,
   },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },

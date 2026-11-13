@@ -25,7 +25,7 @@ import { HostFilterChips, HostSearchBar } from '@/components/HostListToolbar';
 import { AppButton, EmptyState } from '@/components/ui';
 import { COLORS, FONT_WEIGHTS, RADIUS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
-import { useHostSessions } from '@/context/HostSessionContext';
+import { useHostSessions, useSessionActivityLabel } from '@/context/HostSessionContext';
 import {
   cleanErrorMessage,
   isActivityConflictMessage,
@@ -43,7 +43,6 @@ import {
 } from '@/lib/hostSpaceRaces';
 import { buildTeamStandings, getRaceStatus } from '@/lib/spaceRaceTeams';
 import { TAB_BAR_CONTENT_HEIGHT } from '@/lib/tabBarSafeArea';
-import { getSessionActivityLabel } from '@/lib/sessionActivityLabel';
 import { toParticipantCount } from '@/lib/toParticipantCount';
 import { useRtdbList } from '@/lib/useRtdb';
 
@@ -127,11 +126,11 @@ function RaceTimer({ race }: { race: SpaceRace }) {
 
 export default function HostSpaceRaceLibraryScreen() {
   const { profile } = useAuth();
-  const { activeSession, quizzes } = useHostSessions();
+  const { activeSession } = useHostSessions();
+  const activityLabel = useSessionActivityLabel();
   const insets = useSafeAreaInsets();
   const uid = profile?.uid || '';
   const isSessionActive = Boolean(activeSession?.sessionCode);
-  const activityLabel = getSessionActivityLabel(activeSession?.currentActivity, quizzes);
 
   const { list: liveRaces, loading: liveLoading } = useRtdbList(uid ? 'spaceRaces' : null, {
     enabled: Boolean(uid),

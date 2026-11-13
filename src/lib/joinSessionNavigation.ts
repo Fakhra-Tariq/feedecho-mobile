@@ -7,6 +7,24 @@ import {
   stashActivityEntrySource,
   type ActivityEntrySource,
 } from '@/lib/activityEntrySource';
+import { isGuestSessionSync } from '@/lib/guestSession';
+
+/** Expo Router SDK 58 matches nested screens more reliably with pathname+params. */
+export function hrefToRouterTarget(href: string): Href {
+  const q = href.indexOf('?');
+  const pathname = q === -1 ? href : href.slice(0, q);
+  const search = q === -1 ? '' : href.slice(q + 1);
+  if (!search) return pathname as Href;
+  const params: Record<string, string> = {};
+  for (const part of search.split('&')) {
+    if (!part) continue;
+    const eq = part.indexOf('=');
+    const key = eq === -1 ? part : part.slice(0, eq);
+    const value = eq === -1 ? '' : part.slice(eq + 1);
+    if (key) params[decodeURIComponent(key)] = decodeURIComponent(value);
+  }
+  return { pathname, params } as Href;
+}
 
 /**
  * Shared post-join navigation for guest (/join) and logged-in dashboard join.
@@ -23,8 +41,10 @@ export type JoinSessionNavResult = {
   code?: string;
   raceId?: string;
   quizId?: string;
+  ticketId?: string;
   participantId?: string;
   needsTeamSelection?: boolean;
+  alreadySubmitted?: boolean;
 };
 
 const SESSION_CODE_KEY = 'sessionCode';
@@ -51,6 +71,13 @@ export function clearLastAppliedJoinHref() {
   lastAppliedJoinHref = null;
 }
 
+/** Student leave / logout: stop auto-opening the last joined activity. */
+export async function clearJoinedActivityRedirect() {
+  lastAppliedJoinHref = null;
+  await AsyncStorage.removeItem(PENDING_JOIN_HREF_KEY);
+  await clearJoinInProgress();
+}
+
 export async function markJoinInProgress() {
   joinInProgressSync = true;
   lastAppliedJoinHref = null;
@@ -66,26 +93,31 @@ export function hrefForJoinedActivity(
   result: JoinSessionNavResult,
   source?: ActivityEntrySource | null
 ): string | null {
-  if (!result?.success) return null;
+  if (!result?.success || result.needsTeamSelection) return null;
 
   const code = String(result.code || '')
     .trim()
     .toUpperCase();
 
+  const submittedQs = result.alreadySubmitted ? '&alreadySubmitted=1' : '';
   let href: string | null = null;
   if (result.activityType === 'quiz' && result.quizId) {
-    href = `/audience/quiz?quizId=${encodeURIComponent(result.quizId)}`;
+    href = `/audience/quiz?quizId=${encodeURIComponent(result.quizId)}${submittedQs}`;
   } else if (result.activityType === 'liveChat' && code) {
     href = `/audience/live-chat?code=${encodeURIComponent(code)}`;
   } else if (result.activityType === 'exitTicket' && code) {
-    href = `/audience/exit-ticket?code=${encodeURIComponent(code)}`;
+    href = `/audience/exit-ticket?code=${encodeURIComponent(code)}${submittedQs}`;
   } else if (result.activityType === 'spaceRace') {
     const raceQs = result.raceId
       ? `code=${encodeURIComponent(code)}&raceId=${encodeURIComponent(result.raceId)}`
       : `code=${encodeURIComponent(code)}`;
     href = `/audience/space-race?${raceQs}`;
   }
-  return href ? appendActivityEntrySource(href, source) : null;
+  if (!href) return null;
+  const withSource = appendActivityEntrySource(href, source);
+  const guestJoin = source === 'public' || isGuestSessionSync();
+  if (!guestJoin || withSource.includes('isGuestSession=')) return withSource;
+  return `${withSource}${withSource.includes('?') ? '&' : '?'}isGuestSession=1`;
 }
 
 /** Write pending href before AuthContext flips isStudent (EntryGate must see this). */
@@ -165,7 +197,17 @@ export async function navigateToJoinedActivity(
 
   lastAppliedJoinHref = href;
   await AsyncStorage.setItem(PENDING_JOIN_HREF_KEY, href);
-  router.replace(href as Href);
+  const target = hrefToRouterTarget(href);
+  // TEMP DEBUG — remove after guest join is confirmed
+  console.log('[TEMP DEBUG] navigateToJoinedActivity replace', {
+    href,
+    target,
+    source: source || null,
+    activityType: result.activityType,
+    code,
+    guestSession: isGuestSessionSync(),
+  });
+  router.replace(target);
   await clearJoinInProgress();
   // Leave pending for EntryGate / audience safety-net one-shot consume.
   return true;

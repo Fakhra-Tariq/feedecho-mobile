@@ -14,6 +14,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type PropsWithChildren,
 } from 'react';
@@ -23,17 +24,21 @@ import {
   canAccessTeacherPortal,
   syncProfileFromBackend,
 } from '@/lib/ensureProfile';
-import { ApiError } from '@/lib/api';
-import { persistJoinedQuizSession } from '@/lib/audienceQuizSession';
-import { joinSessionUnified } from '@/lib/hostSpaceRaces';
+import { executeSessionJoin, type JoinSessionResult } from '@/lib/joinSessionFlow';
+import {
+  clearGuestSession,
+  hydrateGuestSessionFromStorage,
+  isGuestSessionSync,
+  markGuestSessionActive,
+} from '@/lib/guestSession';
 import {
   clearJoinInProgress,
+  clearLastAppliedJoinHref,
   JOIN_IN_PROGRESS_KEY,
   markJoinInProgress,
   PENDING_JOIN_HREF_KEY,
   stashPendingJoinHref,
 } from '@/lib/joinSessionNavigation';
-import { saveSpaceRaceParticipant } from '@/lib/spaceRaceSession';
 
 const ROLE_KEY = 'feedEcho_role';
 const PORTAL_KEY = 'feedEcho_last_portal';
@@ -89,16 +94,8 @@ type AuthContextValue = {
   joinSession: (input: {
     name: string;
     code: string;
-  }) => Promise<{
-    success: boolean;
-    error?: string;
-    activityType?: string;
-    code?: string;
-    raceId?: string;
-    quizId?: string;
-    participantId?: string;
-    needsTeamSelection?: boolean;
-  }>;
+    teamId?: number | null;
+  }) => Promise<JoinSessionResult>;
   signOut: () => Promise<void>;
 };
 
@@ -193,17 +190,6 @@ async function persistAudienceSession(profile: AppProfile) {
   await AsyncStorage.setItem(STUDENT_NAME_KEY, profile.name);
 }
 
-/** Map /sessions/join `type` to Mobile audience activity routes. */
-function mapJoinActivityType(
-  type: string | undefined
-): 'quiz' | 'spaceRace' | 'exitTicket' | 'liveChat' | null {
-  if (type === 'quiz') return 'quiz';
-  if (type === 'spaceRace') return 'spaceRace';
-  if (type === 'exitTicket') return 'exitTicket';
-  if (type === 'liveChat' || type === 'anonymousChat') return 'liveChat';
-  return null;
-}
-
 function authErrorMessage(error: unknown, fallback = 'Login failed') {
   const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
   const rawMessage = error instanceof Error ? error.message : '';
@@ -265,27 +251,37 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [profile, setProfile] = useState<AppProfile | null>(null);
   const [portal, setPortal] = useState<Portal | null>(null);
   const [loading, setLoading] = useState(true);
+  const authEpoch = useRef(0);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
+      const epoch = ++authEpoch.current;
       try {
+        await hydrateGuestSessionFromStorage();
+        if (epoch !== authEpoch.current) return;
         if (!nextUser) {
           const raw = await AsyncStorage.getItem(AUDIENCE_KEY);
           if (raw) {
             const guest = JSON.parse(raw) as AppProfile;
             if (guest?.guest && guest.role === 'student') {
+              markGuestSessionActive();
+              if (epoch !== authEpoch.current) return;
               setUser(null);
               setProfile(guest);
               setPortal('student');
               return;
             }
           }
+          // A guest join may have just set profile while this callback was in
+          // flight. Do not wipe it — that bounced Live Chat back to `/`.
+          if (isGuestSessionSync() || epoch !== authEpoch.current) return;
           setUser(null);
           setProfile(null);
           setPortal(null);
           return;
         }
 
+        clearGuestSession();
         const snap = await get(ref(db, `users/${nextUser.uid}`));
         const record = snap.exists() ? (snap.val() as Record<string, unknown>) : null;
         const roles = rolesOf(record as { role?: string; roles?: string[] } | null);
@@ -297,6 +293,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         }
 
         const role: AppProfile['role'] = nextPortal === 'teacher' ? 'teacher' : 'student';
+        if (epoch !== authEpoch.current) return;
         setUser(nextUser);
         setPortal(nextPortal);
         setProfile({
@@ -307,11 +304,12 @@ export function AuthProvider({ children }: PropsWithChildren) {
           roles: roles.length ? roles : [role],
         });
       } catch {
+        if (epoch !== authEpoch.current) return;
         setUser(nextUser);
         setProfile(null);
         setPortal(null);
       } finally {
-        setLoading(false);
+        if (epoch === authEpoch.current) setLoading(false);
       }
     });
 
@@ -333,6 +331,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       }
       await writePortal(result.user.uid, 'teacher');
       await clearAudienceSession();
+      clearGuestSession();
       const profileNext = profileFromBackend(result.user, backend, 'teacher');
       setUser(result.user);
       setProfile(profileNext);
@@ -365,6 +364,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       }
       await writePortal(result.user.uid, 'teacher');
       await clearAudienceSession();
+      clearGuestSession();
       const profileNext = profileFromBackend(result.user, backend, 'teacher');
       setUser(result.user);
       setProfile(profileNext);
@@ -407,6 +407,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       }
       await writePortal(firebaseUser.uid, 'teacher');
       await clearAudienceSession();
+      clearGuestSession();
       const profileNext = profileFromBackend(firebaseUser, backend, 'teacher');
       setUser(firebaseUser);
       setProfile(profileNext);
@@ -433,6 +434,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       const profileNext = profileFromBackend(result.user, backend, 'student');
       await writePortal(result.user.uid, 'student');
       await persistAudienceSession(profileNext);
+      clearGuestSession();
       setUser(result.user);
       setProfile(profileNext);
       setPortal('student');
@@ -465,6 +467,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       const profileNext = profileFromBackend(result.user, backend, 'student');
       await writePortal(result.user.uid, 'student');
       await persistAudienceSession(profileNext);
+      clearGuestSession();
       setUser(result.user);
       setProfile(profileNext);
       setPortal('student');
@@ -507,6 +510,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       const profileNext = profileFromBackend(firebaseUser, backend, 'student');
       await writePortal(firebaseUser.uid, 'student');
       await persistAudienceSession(profileNext);
+      clearGuestSession();
       setUser(firebaseUser);
       setProfile(profileNext);
       setPortal('student');
@@ -525,27 +529,34 @@ export function AuthProvider({ children }: PropsWithChildren) {
     }
   };
 
-  const joinSession = async ({ name, code }: { name: string; code: string }) => {
-    const trimmedName = name.trim();
-    if (!trimmedName) {
-      return { success: false, error: 'Name is required' };
-    }
-    const trimmedCode = String(code || '').trim().toUpperCase();
+  const joinSession = async ({
+    name,
+    code,
+    teamId = null,
+  }: {
+    name: string;
+    code: string;
+    teamId?: number | null;
+  }): Promise<JoinSessionResult> => {
+    const trimmedName = name.trim() || profile?.name?.trim() || 'Audience';
+    const trimmedCode = String(code || '')
+      .trim()
+      .toUpperCase();
     if (trimmedCode.length !== 6) {
       return { success: false, error: 'Session code must be exactly 6 characters' };
     }
-    if (user && portal === 'teacher') {
-      return { success: false, error: 'Host accounts join from the host dashboard.' };
-    }
 
     const finishLocalAudience = async (activityType: string) => {
+      authEpoch.current += 1;
       if (user) {
         const student: AppProfile = {
           uid: user.uid,
           email: user.email || profile?.email || '',
           name: trimmedName || profile?.name || 'Audience',
           role: 'student',
-          roles: profile?.roles?.includes('student') ? profile.roles : ['student'],
+          roles: profile?.roles?.includes('student')
+            ? profile.roles
+            : ['student', ...(profile?.roles || [])],
         };
         await writePortal(user.uid, 'student');
         await AsyncStorage.setItem(AUDIENCE_KEY, JSON.stringify(student));
@@ -565,6 +576,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         roles: ['student'],
         guest: true,
       };
+      markGuestSessionActive();
       await AsyncStorage.setItem(AUDIENCE_KEY, JSON.stringify(guest));
       await AsyncStorage.setItem(STUDENT_NAME_KEY, trimmedName);
       await AsyncStorage.setItem(SESSION_CODE_KEY, trimmedCode);
@@ -575,116 +587,43 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setPortal('student');
     };
 
-    try {
-      // Match Web: POST /sessions/join via anonymous API (Admin SDK writes participants).
-      // Server reads sessions/{id}.currentActivity — do NOT resolve activity on the client.
-      // Guests omit studentUid/studentEmail; logged-in students include them.
-      const studentUid =
-        user?.uid || (profile?.guest ? undefined : profile?.uid) || undefined;
-      const studentEmail = user?.email || profile?.email || undefined;
+    // Guests omit studentUid/studentEmail; logged-in accounts include them (Web).
+    // A host who joins by code is treated as an audience member for this session.
+    const studentUid =
+      user?.uid || (profile?.guest ? undefined : profile?.uid) || undefined;
+    const studentEmail = user?.email || profile?.email || undefined;
 
-      const response = await joinSessionUnified({
-        name: trimmedName,
-        code: trimmedCode,
-        studentUid,
-        studentEmail,
-      });
+    const joinResult = await executeSessionJoin({
+      name: trimmedName,
+      code: trimmedCode,
+      teamId,
+      studentUid,
+      studentEmail,
+      loggedInStudent: Boolean(user?.uid && !profile?.guest && !canTeach(profile?.roles || [])),
+    });
 
-      // Space race student-choice: finish join on the race screen after team pick.
-      if (response.needsTeamSelection && response.type === 'spaceRace') {
-        const teamPickResult = {
-          success: true as const,
-          activityType: 'spaceRace' as const,
-          code: trimmedCode,
-          raceId: response.raceId ? String(response.raceId) : undefined,
-          needsTeamSelection: true,
-        };
-        await markJoinInProgress();
-        await stashPendingJoinHref(teamPickResult);
-        await finishLocalAudience('spaceRace');
-        return teamPickResult;
-      }
-
-      if (!response.success) {
-        await clearJoinInProgress();
-        return {
-          success: false,
-          error:
-            response.message ||
-            response.error ||
-            'Failed to join session. Please try again.',
-        };
-      }
-
-      const activityType = mapJoinActivityType(response.type);
-      if (!activityType) {
-        await clearJoinInProgress();
-        return { success: false, error: 'Unsupported session type' };
-      }
-
-      if (response.type === 'spaceRace' && response.participantId) {
-        await saveSpaceRaceParticipant({
-          id: response.participantId,
-          name: trimmedName,
-          raceId: response.raceId || response.data?.id,
-          teamId: response.teamId ?? null,
-          studentUid: studentUid || undefined,
-          studentEmail: studentEmail || undefined,
-          launchId: response.data?.currentLaunchId || null,
-          joinedAsGuest: !studentUid,
-        });
-      }
-
-      // Same as Web proceedWithSessionJoin for quiz: lock studentSession + participant backup.
-      if (response.type === 'quiz' && response.quizId && response.participantId && response.data) {
-        if (!response.data.title) {
-          await clearJoinInProgress();
-          return { success: false, error: 'Quiz data is incomplete. Please try again.' };
-        }
-        await persistJoinedQuizSession({
-          studentName: trimmedName,
-          sessionCode: trimmedCode,
-          quizId: String(response.quizId),
-          participantId: String(response.participantId),
-          quiz: response.data,
-          studentUid: studentUid || null,
-          studentEmail: studentEmail || null,
-        });
-      }
-
-      const joinResult = {
-        success: true as const,
-        activityType,
-        code: String(response.joinCode || trimmedCode).toUpperCase(),
-        raceId: response.raceId ? String(response.raceId) : undefined,
-        quizId: response.quizId ? String(response.quizId) : undefined,
-        participantId: response.participantId ? String(response.participantId) : undefined,
-      };
-
-      // Mark + stash BEFORE finishLocalAudience flips isStudent (EntryGate race).
-      await markJoinInProgress();
-      await stashPendingJoinHref(joinResult);
-      await finishLocalAudience(activityType);
-
-      return joinResult;
-    } catch (error) {
+    if (joinResult.needsTeamSelection) {
       await clearJoinInProgress();
-      if (error instanceof ApiError) {
-        const data = error.data as { message?: string; error?: string } | null;
-        return {
-          success: false,
-          error:
-            data?.message ||
-            data?.error ||
-            error.message ||
-            'Failed to join session. Please try again.',
-        };
-      }
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to join session. Please try again.',
-      };
+      return joinResult;
     }
+
+    if (!joinResult.success || !joinResult.activityType) {
+      await clearJoinInProgress();
+      return joinResult;
+    }
+
+    await markJoinInProgress();
+    const pendingHref = await stashPendingJoinHref(joinResult);
+    await finishLocalAudience(String(joinResult.activityType));
+    // TEMP DEBUG — remove after guest join is confirmed
+    console.log('[TEMP DEBUG] joinSession stored', {
+      code: trimmedCode,
+      activityType: joinResult.activityType,
+      pendingHref,
+      guest: !user,
+      userUid: user?.uid || null,
+    });
+    return joinResult;
   };
 
   const signOut = async () => {
@@ -698,6 +637,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
       PENDING_JOIN_HREF_KEY,
       JOIN_IN_PROGRESS_KEY,
     ]);
+    clearGuestSession();
+    clearLastAppliedJoinHref();
     await clearJoinInProgress();
     if (auth.currentUser) {
       await firebaseSignOut(auth);

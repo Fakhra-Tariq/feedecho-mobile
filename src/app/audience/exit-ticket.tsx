@@ -28,6 +28,12 @@ import {
   submitExitTicketResponse,
   type ExitTicket,
 } from '@/lib/hostExitTickets';
+import {
+  getMyParticipation,
+  hasGuestSubmitted,
+  markExitTicketParticipated,
+  markGuestExitTicketSubmitted,
+} from '@/lib/studentParticipation';
 
 const SESSION_CODE_KEY = 'sessionCode';
 const STUDENT_NAME_KEY = 'studentName';
@@ -36,7 +42,10 @@ const MAX_CHARS = 500;
 export default function AudienceExitTicketScreen() {
   const { profile } = useAuth();
   const { leave } = useLeaveActivity();
-  const params = useLocalSearchParams<{ code?: string }>();
+  const params = useLocalSearchParams<{ code?: string; alreadySubmitted?: string }>();
+  const alreadySubmittedParam = String(params.alreadySubmitted || '') === '1';
+  const isLoggedInStudent = Boolean(profile?.uid && !profile?.guest);
+  const isGuest = Boolean(profile?.guest) && !isLoggedInStudent;
   const [joinCode, setJoinCode] = useState('');
   const [codeInput, setCodeInput] = useState('');
   const [ticket, setTicket] = useState<ExitTicket | null>(null);
@@ -83,6 +92,19 @@ export default function AudienceExitTicketScreen() {
           initial[index] = '';
         });
         setAnswers(initial);
+        if (alreadySubmittedParam && isLoggedInStudent) {
+          setSubmitted(true);
+        } else if (isLoggedInStudent && response.data.id) {
+          const part = await getMyParticipation(
+            'exitTicket',
+            response.data.id,
+            String(profile?.uid || ''),
+            { email: profile?.email, name: profile?.name }
+          );
+          if (!cancelled && part.status === 'submitted') {
+            setSubmitted(true);
+          }
+        }
       } catch (err) {
         if (!cancelled) {
           setTicket(null);
@@ -95,7 +117,7 @@ export default function AudienceExitTicketScreen() {
     return () => {
       cancelled = true;
     };
-  }, [joinCode]);
+  }, [joinCode, alreadySubmittedParam, isLoggedInStudent, profile?.uid, profile?.email, profile?.name]);
 
   const setAnswer = (index: number, value: string) => {
     setAnswers((prev) => ({ ...prev, [index]: value }));
@@ -111,9 +133,28 @@ export default function AudienceExitTicketScreen() {
   };
 
   const onSubmit = async () => {
-    if (!ticket || submitting) return;
+    if (!ticket || submitting || submitted) return;
+    if (isLoggedInStudent && profile?.uid) {
+      const part = await getMyParticipation('exitTicket', ticket.id, String(profile.uid), {
+        email: profile.email,
+        name: profile.name,
+      });
+      if (part.status === 'submitted') {
+        setSubmitted(true);
+        return;
+      }
+    }
     const studentName =
       (await AsyncStorage.getItem(STUDENT_NAME_KEY))?.trim() || profile?.name?.trim() || '';
+    if (isGuest && studentName) {
+      try {
+        if (await hasGuestSubmitted('exitTicket', ticket.id, studentName)) {
+          return;
+        }
+      } catch (checkErr) {
+        console.warn('[guest submit check] network error, allowing submit', checkErr);
+      }
+    }
     if (!studentName) {
       showAlert({
         type: 'warning',
@@ -151,6 +192,11 @@ export default function AudienceExitTicketScreen() {
       });
       if (!result.success) {
         throw new Error(result.error || 'Failed to submit response');
+      }
+      if (isLoggedInStudent && profile?.uid) {
+        await markExitTicketParticipated(String(profile.uid), ticket.id);
+      } else if (isGuest && studentName) {
+        await markGuestExitTicketSubmitted(ticket.id, studentName);
       }
       setSubmitted(true);
     } catch (err) {
@@ -191,7 +237,7 @@ export default function AudienceExitTicketScreen() {
 
   if (!joinCode || (!ticket && !loading && error)) {
     return (
-      <KeyboardSafeScreen scroll={false} style={styles.screen}>
+      <KeyboardSafeScreen style={styles.screen}>
         <View style={styles.card}>
           <Text style={styles.heading}>Join Exit Ticket</Text>
           <Text style={styles.hint}>Enter the code shared by your host</Text>
@@ -248,7 +294,7 @@ export default function AudienceExitTicketScreen() {
         <TouchableOpacity
           style={[styles.primary, submitting && styles.disabled]}
           onPress={onSubmit}
-          disabled={submitting}>
+          disabled={submitting || submitted}>
           <Text style={styles.primaryLabel}>
             {submitting ? 'Submitting...' : 'Submit Response'}
           </Text>

@@ -1,46 +1,71 @@
-import { Ionicons } from '@expo/vector-icons';
-import { Redirect, Tabs, router, type Href } from 'expo-router';
+import { Redirect, Stack, router, usePathname, type Href } from 'expo-router';
 import { useEffect } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Platform, StatusBar, StyleSheet, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { LogoutButton } from '@/components/LogoutButton';
+import { StudentAccountButton } from '@/components/HostProfileButton';
 import { COLORS, FONT_WEIGHTS } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
-import { resolvePendingJoinHref } from '@/lib/joinSessionNavigation';
-import { useSafeTabBarStyle } from '@/lib/tabBarSafeArea';
+import { isAudienceActivityPath, isCodeJoinGuest, isGuestSessionSync } from '@/lib/guestSession';
+import {
+  getLastAppliedJoinHref,
+  hrefToRouterTarget,
+  resolvePendingJoinHref,
+} from '@/lib/joinSessionNavigation';
 
 /**
- * If a join completed but we landed on the audience shell (dashboard index)
- * before the activity replace applied, finish the redirect here.
- * No-op when there is no pending join (fresh student open).
+ * Audience shell: tab Home/Progress/Study/Profile in `(tabs)`, activities as
+ * stack screens. Expo Router SDK 58 `href: null` on a tab unregisters the
+ * route, so join → `/audience/live-chat` (and quiz / race / ticket) was a
+ * no-op that dumped guests on the dashboard.
  */
-function usePendingJoinSafetyNet(enabled: boolean) {
+function usePendingJoinSafetyNet(enabled: boolean, isGuest: boolean) {
+  const pathname = usePathname();
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
     (async () => {
-      const href = await resolvePendingJoinHref({ retries: 1, delayMs: 30 });
+      // One-shot pending href only. lastAppliedJoinHref is guest recovery —
+      // using it for logged-in students re-opens Live Chat after they leave Home.
+      const href =
+        (await resolvePendingJoinHref({ retries: 1, delayMs: 30 })) ||
+        (isGuest ? getLastAppliedJoinHref() : null);
       if (cancelled || !href) return;
-      router.replace(href as Href);
+      const pathOnly = href.split('?')[0];
+      if (pathname && pathOnly && pathname.startsWith(pathOnly)) return;
+      // TEMP DEBUG — remove after student leave-from-chat is confirmed
+      console.log('[TEMP DEBUG] audience layout safety-net replace', {
+        from: pathname,
+        to: href,
+        isGuest,
+        guestSession: isGuestSessionSync(),
+      });
+      router.replace(hrefToRouterTarget(href));
     })();
     return () => {
       cancelled = true;
     };
-  }, [enabled]);
+  }, [enabled, pathname, isGuest]);
 }
 
-/**
- * Mobile adaptation of Web AudienceDashboardNavbar:
- * Web top nav = Home + Progress (+ AI toggle + Profile menu).
- * Tabs: Home | Progress | Study | Profile. Activity screens stay hidden.
- */
 export default function AudienceLayout() {
-  const { loading, isStudent, isHost, profile } = useAuth();
-  const isGuest = Boolean(profile?.guest);
-  const tabBarStyle = useSafeTabBarStyle();
-  usePendingJoinSafetyNet(Boolean(isStudent && !isHost && !loading));
+  const { loading, isStudent, isHost, profile, user, portal } = useAuth();
+  const pathname = usePathname();
+  const isGuest = isCodeJoinGuest({
+    profileGuest: profile?.guest,
+    isHost,
+    firebaseUid: user?.uid,
+  });
+  const onActivity = isAudienceActivityPath(pathname);
+  const insets = useSafeAreaInsets();
+  const androidHeaderStatusBarHeight =
+    Platform.OS === 'android' ? Math.max(insets.top, StatusBar.currentHeight ?? 0) : undefined;
+  usePendingJoinSafetyNet(
+    Boolean((isStudent || isGuest || onActivity) && !isHost && !loading),
+    isGuest
+  );
 
-  if (loading) {
+  if (loading && !onActivity) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator color={COLORS.primary} />
@@ -48,130 +73,64 @@ export default function AudienceLayout() {
     );
   }
 
-  if (isHost) {
+  if (isHost && !onActivity) {
+    console.log('[TEMP DEBUG] audience layout redirect', { from: pathname, to: '/host', user: user?.uid || null, role: profile?.role, portal, loading, isGuest });
     return <Redirect href={'/host' as Href} />;
   }
 
-  if (!isStudent) {
+  // Guests must stay on Live Chat / Quiz / Race / Ticket even if auth briefly
+  // reports portal=null (onAuthStateChanged racing the join). Never bounce `/`.
+  if (!onActivity && !isStudent && !isGuest) {
+    console.log('[TEMP DEBUG] audience layout redirect', { from: pathname, to: '/', user: user?.uid || null, role: profile?.role, portal, loading, isGuest });
     return <Redirect href={'/' as Href} />;
   }
 
+  const activityHeader = {
+    headerStyle: { backgroundColor: COLORS.white },
+    headerTintColor: COLORS.header,
+    headerTitleStyle: { fontWeight: FONT_WEIGHTS.semibold, color: COLORS.header },
+    headerShadowVisible: false,
+    headerRight: isGuest ? () => null : () => <StudentAccountButton />,
+    ...(androidHeaderStatusBarHeight != null
+      ? { headerStatusBarHeight: androidHeaderStatusBarHeight }
+      : {}),
+  };
+
   return (
-    <Tabs
+    <Stack
       screenOptions={{
         headerStyle: { backgroundColor: COLORS.white },
         headerTintColor: COLORS.header,
         headerTitleStyle: { fontWeight: FONT_WEIGHTS.semibold, color: COLORS.header },
         headerShadowVisible: false,
-        headerRight: () => <LogoutButton />,
-        tabBarActiveTintColor: COLORS.primary,
-        tabBarInactiveTintColor: COLORS.iconMuted,
-        tabBarLabelStyle: { fontSize: 11, fontWeight: FONT_WEIGHTS.medium },
-        tabBarStyle,
-        tabBarHideOnKeyboard: true,
-        sceneStyle: { backgroundColor: COLORS.background },
+        contentStyle: { backgroundColor: COLORS.background },
       }}>
-      <Tabs.Screen
-        name="index"
-        options={{
-          title: 'Home',
-          tabBarLabel: 'Home',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="home-outline" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="progress"
-        options={{
-          title: 'Progress',
-          tabBarLabel: 'Progress',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="trending-up-outline" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="study-assistant"
-        options={{
-          title: 'Study',
-          tabBarLabel: 'Study',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="sparkles-outline" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="profile"
-        options={{
-          title: 'Profile',
-          tabBarLabel: 'Profile',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="person-outline" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen name="join" options={{ href: null, title: 'Join a Session' }} />
-      <Tabs.Screen
-        name="quiz"
-        options={{
-          href: null,
-          title: 'Quiz',
-          ...(isGuest
-            ? {
-                headerRight: () => null,
-                tabBarStyle: { display: 'none' as const },
-              }
-            : {}),
-        }}
-      />
-      <Tabs.Screen name="quiz-history" options={{ href: null, title: 'My Quizzes' }} />
-      <Tabs.Screen
+      <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+      <Stack.Screen name="join" options={{ title: 'Join a Session', ...activityHeader }} />
+      <Stack.Screen name="quiz" options={{ title: 'Quiz', ...activityHeader }} />
+      <Stack.Screen name="quiz-history" options={{ title: 'My Quizzes', ...activityHeader }} />
+      <Stack.Screen
         name="space-race-history"
-        options={{ href: null, title: 'Space Race History' }}
+        options={{ title: 'Space Race History', ...activityHeader }}
       />
-      <Tabs.Screen
+      <Stack.Screen
         name="live-chat"
         options={{
-          href: null,
           title: 'Live Chat',
-          sceneStyle: { backgroundColor: COLORS.cream },
+          ...activityHeader,
+          contentStyle: { backgroundColor: COLORS.cream },
         }}
       />
-      <Tabs.Screen
-        name="exit-ticket"
-        options={{
-          href: null,
-          title: 'Exit Ticket',
-          ...(isGuest
-            ? {
-                headerRight: () => null,
-                tabBarStyle: { display: 'none' as const },
-              }
-            : {}),
-        }}
-      />
-      <Tabs.Screen
+      <Stack.Screen name="exit-ticket" options={{ title: 'Exit Ticket', ...activityHeader }} />
+      <Stack.Screen
         name="space-race"
-        options={{
-          href: null,
-          title: 'Space Race',
-          headerShown: false,
-          headerRight: () => null,
-          tabBarStyle: { display: 'none' as const },
-        }}
+        options={{ title: 'Space Race', headerShown: false, headerRight: () => null }}
       />
-      <Tabs.Screen
+      <Stack.Screen
         name="space-race-quiz"
-        options={{
-          href: null,
-          title: 'Race Quiz',
-          headerShown: false,
-          headerRight: () => null,
-          tabBarStyle: { display: 'none' as const },
-        }}
+        options={{ title: 'Race Quiz', headerShown: false, headerRight: () => null }}
       />
-    </Tabs>
+    </Stack>
   );
 }
 

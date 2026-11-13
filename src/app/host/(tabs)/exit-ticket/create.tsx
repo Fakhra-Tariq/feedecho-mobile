@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams, type Href } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -262,7 +262,7 @@ export default function CreateExitTicketScreen() {
         <View style={styles.stepperCard}>
           <View style={styles.stepperRow}>
             {[1, 2, 3].map((n) => (
-              <View key={n} style={styles.stepperSegment}>
+              <Fragment key={n}>
                 <View
                   style={[
                     styles.stepCircle,
@@ -275,7 +275,7 @@ export default function CreateExitTicketScreen() {
                     style={[styles.stepLine, step > n ? styles.stepLineOn : styles.stepLineOff]}
                   />
                 ) : null}
-              </View>
+              </Fragment>
             ))}
           </View>
           <Text style={styles.stepCaption}>{STEP_LABELS[step - 1]}</Text>
@@ -592,7 +592,7 @@ export default function CreateExitTicketScreen() {
               <Text style={styles.primaryBtnLabel}>
                 {saving ? 'Launching…' : 'Launch Exit Ticket'}
               </Text>
-              {!saving ? <Ionicons name="rocket-outline" size={18} color={COLORS.white} /> : null}
+              {!saving ? <Ionicons name="play-outline" size={18} color={COLORS.white} /> : null}
             </Pressable>
           </View>
         ) : null}
@@ -673,11 +673,8 @@ const styles = StyleSheet.create({
     padding: 14,
   },
   stepperRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  stepperSegment: {
-    flex: 1,
+    width: '100%',
+    alignSelf: 'stretch',
     flexDirection: 'row',
     alignItems: 'center',
   },

@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
-import { router, type Href } from 'expo-router';
+import { router, useFocusEffect, type Href } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -23,12 +23,13 @@ import { KEYBOARD_SCROLL_PROPS, KeyboardSafeScreen } from '@/components/Keyboard
 import { LaunchQuizSettingsModal } from '@/components/LaunchQuizSettingsModal';
 import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
-import { useHostSessions } from '@/context/HostSessionContext';
+import { useHostSessions, useSessionActivityLabel } from '@/context/HostSessionContext';
 import { normalizeQuizTypeLabel } from '@/lib/aiGeneratedQuiz';
 import {
   deleteQuiz,
   finishQuiz,
   listTeacherQuizzes,
+  mergeTeacherQuizLists,
   quizBucket,
   subscribeTeacherQuizzes,
   type HostQuiz,
@@ -36,7 +37,6 @@ import {
 import { formatSessionDate } from '@/lib/formatLocalDateTime';
 import { autoFinishExpiredQuiz } from '@/lib/quizAutoFinish';
 import { getQuizTimeRemaining, isQuizExpired } from '@/lib/quizExpiry';
-import { getSessionActivityLabel } from '@/lib/sessionActivityLabel';
 import { TAB_BAR_CONTENT_HEIGHT } from '@/lib/tabBarSafeArea';
 
 /** Web ListFilterBar tabs — chip label "Launched" filters status `launched`. */
@@ -90,9 +90,10 @@ function statusBadgeLabel(quiz: HostQuiz) {
 
 export default function QuizLibraryScreen() {
   const insets = useSafeAreaInsets();
-  const { profile } = useAuth();
+  const { profile, user } = useAuth();
   const { activeSession, createSession } = useHostSessions();
-  const teacherId = profile?.uid || '';
+  const activityLabel = useSessionActivityLabel();
+  const teacherId = String(user?.uid || profile?.uid || '').trim();
 
   const [quizzes, setQuizzes] = useState<HostQuiz[]>([]);
   const [loading, setLoading] = useState(true);
@@ -158,10 +159,10 @@ export default function QuizLibraryScreen() {
           }
           return q;
         });
-      // Do not let an older Finished snapshot replace a newer Launched row
-      // (Web GET /quizzes is the same source as listTeacherQuizzes).
-      setQuizzes((prev) =>
-        mapped.map((q) => {
+      // Merge into the current list. Never replace a non-empty library with [].
+      setQuizzes((prev) => {
+        const incoming = mapped.length === 0 ? prev : mergeTeacherQuizLists(mapped, prev);
+        return incoming.map((q) => {
           const old = prev.find((p) => p.id === q.id);
           if (old && quizBucket(old) === 'launched' && quizBucket(q) === 'finished') {
             const oldTs = Date.parse(String(old.updatedAt || '')) || 0;
@@ -169,8 +170,8 @@ export default function QuizLibraryScreen() {
             if (newTs <= oldTs) return old;
           }
           return q;
-        })
-      );
+        });
+      });
       setLoading(false);
     };
 
@@ -188,12 +189,15 @@ export default function QuizLibraryScreen() {
     const unsubscribe = subscribeTeacherQuizzes(
       teacherId,
       (rows) => {
-        if (rows.length > 0) {
-          sawRtdbRows = true;
-          applyRows(rows);
-          return;
-        }
-        loadApiList();
+        if (rows.length > 0) sawRtdbRows = true;
+        listTeacherQuizzes(teacherId)
+          .then((apiRows) => {
+            if (cancelled) return;
+            applyRows(mergeTeacherQuizLists(apiRows, rows));
+          })
+          .catch(() => {
+            if (!cancelled) applyRows(rows);
+          });
       },
       () => loadApiList()
     );
@@ -229,13 +233,6 @@ export default function QuizLibraryScreen() {
     [quizzes, nowTick]
   );
 
-  const fromSession = getSessionActivityLabel(activeSession?.currentActivity, quizzes);
-  const activityLabel =
-    fromSession !== 'No active activity'
-      ? fromSession
-      : hasActiveQuiz
-        ? 'Active Quiz'
-        : fromSession;
 
   const filtered = useMemo(() => {
     let rows = quizzes;
@@ -307,6 +304,12 @@ export default function QuizLibraryScreen() {
         // Keep the live list; launch/finish already updated local state.
       });
   }, [teacherId]);
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshQuizzesFromApi();
+    }, [refreshQuizzesFromApi])
+  );
 
   const onFinish = useCallback(async (quiz: HostQuiz) => {
     try {
@@ -456,8 +459,10 @@ export default function QuizLibraryScreen() {
             { label: 'Finished', value: stats.finished },
           ].map((item) => (
             <View key={item.label} style={styles.heroStat}>
-              <Text style={styles.heroStatLabel}>{item.label}</Text>
               <Text style={styles.heroStatValue}>{item.value}</Text>
+              <Text style={styles.heroStatLabel} numberOfLines={1}>
+                {item.label}
+              </Text>
             </View>
           ))}
         </View>
@@ -593,7 +598,7 @@ export default function QuizLibraryScreen() {
           <View style={styles.codeBox}>
             <View style={{ flex: 1, minWidth: 0 }}>
               <Text style={styles.codeLabel}>Audience Access Code</Text>
-              <Text style={styles.codeValue} selectable>
+              <Text style={styles.codeValue}>
                 {String(accessCode).toUpperCase()}
               </Text>
             </View>
@@ -870,25 +875,29 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
   heroStats: {
-    marginTop: SPACING[2.5],
+    marginTop: 10,
     flexDirection: 'row',
+    gap: 8,
   },
   heroStat: {
     flex: 1,
     minWidth: 0,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 6,
     alignItems: 'center',
-  },
-  heroStatLabel: {
-    fontSize: 10,
-    lineHeight: 12,
-    color: 'rgba(255,255,255,0.8)',
+    justifyContent: 'center',
   },
   heroStatValue: {
-    marginTop: 2,
-    fontSize: 18,
-    lineHeight: 22,
-    fontWeight: FONT_WEIGHTS.bold,
     color: COLORS.white,
+    fontWeight: FONT_WEIGHTS.bold,
+    fontSize: 18,
+  },
+  heroStatLabel: {
+    color: '#EADBE5',
+    fontSize: 11,
+    marginTop: 2,
   },
   chipsRow: {
     flexDirection: 'row',

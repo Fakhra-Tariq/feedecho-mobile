@@ -10,6 +10,8 @@ import {
 } from 'react';
 
 import { useAuth } from '@/context/AuthContext';
+import { syncActiveActivitySource } from '@/lib/activeActivity';
+import { subscribeTeacherQuizzes, type HostQuiz } from '@/lib/hostQuizzes';
 import {
   createTeacherSession,
   deleteEndedSession,
@@ -20,15 +22,20 @@ import {
   subscribeTeacherSessions,
   type HostSession,
 } from '@/lib/hostSessions';
-import { subscribeTeacherQuizzes, type HostQuiz } from '@/lib/hostQuizzes';
-import { syncActiveActivitySource } from '@/lib/activeActivity';
+import { liveHostActivityLabel, pickLiveHostActivity } from '@/lib/liveHostActivity';
 import { autoFinishExpiredQuiz } from '@/lib/quizAutoFinish';
 import { isQuizExpired } from '@/lib/quizExpiry';
+import { useRtdbList } from '@/lib/useRtdb';
 
 type HostSessionContextValue = {
   sessions: HostSession[];
   activeSession: HostSession | null;
   quizzes: HostQuiz[];
+  liveChats: ReturnType<typeof useRtdbList>['list'];
+  liveRaces: ReturnType<typeof useRtdbList>['list'];
+  liveTickets: ReturnType<typeof useRtdbList>['list'];
+  /** Derived from live chat/quiz/race/ticket status, not sessions.currentActivity. */
+  sessionActivityLabel: string;
   loading: boolean;
   createSession: (sessionName: string) => Promise<HostSession>;
   endSession: (session: HostSession) => Promise<void>;
@@ -43,6 +50,7 @@ export function HostSessionProvider({ children }: PropsWithChildren) {
   const [sessions, setSessions] = useState<HostSession[]>([]);
   const [quizzes, setQuizzes] = useState<HostQuiz[]>([]);
   const [loading, setLoading] = useState(true);
+  const [nowTick, setNowTick] = useState(0);
   const quizzesRef = useRef<HostQuiz[]>([]);
   quizzesRef.current = quizzes;
   /** API end/delete land before RTDB; skip stale snapshots until RTDB matches. */
@@ -130,9 +138,24 @@ export function HostSessionProvider({ children }: PropsWithChildren) {
     return unsubscribe;
   }, [isHost, teacherId]);
 
+  const listenLive = Boolean(isHost && teacherId);
+  const { list: liveChats } = useRtdbList(listenLive ? 'chat_sessions' : null, {
+    enabled: listenLive,
+    filter: (chat) => String(chat?.createdBy || '') === teacherId,
+  });
+  const { list: liveRaces } = useRtdbList(listenLive ? 'spaceRaces' : null, {
+    enabled: listenLive,
+    filter: (race) => String(race?.createdBy || '') === teacherId,
+  });
+  const { list: liveTickets } = useRtdbList(listenLive ? 'exit_tickets' : null, {
+    enabled: listenLive,
+    filter: (ticket) => String(ticket?.createdBy || '') === teacherId,
+  });
+
   useEffect(() => {
     if (!isHost) return undefined;
     const timer = setInterval(() => {
+      setNowTick(Date.now());
       quizzesRef.current.forEach((quiz) => {
         if (isQuizExpired(quiz)) void autoFinishExpiredQuiz(quiz);
       });
@@ -143,6 +166,20 @@ export function HostSessionProvider({ children }: PropsWithChildren) {
   const activeSession = useMemo(
     () => sessions.find((session) => isSessionActive(session)) || null,
     [sessions]
+  );
+
+  const sessionActivityLabel = useMemo(
+    () =>
+      liveHostActivityLabel(
+        pickLiveHostActivity({
+          chats: liveChats,
+          quizzes,
+          races: liveRaces,
+          tickets: liveTickets,
+          now: nowTick || Date.now(),
+        })
+      ),
+    [liveChats, quizzes, liveRaces, liveTickets, nowTick]
   );
 
   const createSession = useCallback(
@@ -197,12 +234,28 @@ export function HostSessionProvider({ children }: PropsWithChildren) {
       sessions,
       activeSession,
       quizzes,
+      liveChats,
+      liveRaces,
+      liveTickets,
+      sessionActivityLabel,
       loading,
       createSession,
       endSession,
       deleteSession,
     }),
-    [sessions, activeSession, quizzes, loading, createSession, endSession, deleteSession]
+    [
+      sessions,
+      activeSession,
+      quizzes,
+      liveChats,
+      liveRaces,
+      liveTickets,
+      sessionActivityLabel,
+      loading,
+      createSession,
+      endSession,
+      deleteSession,
+    ]
   );
 
   return <HostSessionContext.Provider value={value}>{children}</HostSessionContext.Provider>;
@@ -214,4 +267,9 @@ export function useHostSessions() {
     throw new Error('useHostSessions must be used within a HostSessionProvider');
   }
   return value;
+}
+
+/** Same live pill label on every host screen; listeners live in HostSessionProvider. */
+export function useSessionActivityLabel() {
+  return useHostSessions().sessionActivityLabel;
 }

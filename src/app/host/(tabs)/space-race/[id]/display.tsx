@@ -1,17 +1,20 @@
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { COLORS, FONT_WEIGHTS, SPACING } from '@/constants/theme';
+import { spaceRaceTeamPercentFromSelections } from '@/lib/spaceRaceResultStats';
 import { TAB_BAR_CONTENT_HEIGHT } from '@/lib/tabBarSafeArea';
 import { useRtdbList, useRtdbValue } from '@/lib/useRtdb';
 
@@ -31,6 +34,50 @@ const TEAM_STYLES = [
 function getTeamStyle(teamId: number) {
   const idx = Math.max(0, (Number(teamId) || 1) - 1);
   return TEAM_STYLES[idx % TEAM_STYLES.length];
+}
+
+function clampByte(value: number) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function parseHexColor(hex: string): [number, number, number] {
+  const raw = String(hex || '').replace('#', '');
+  if (raw.length === 3) {
+    return [
+      parseInt(raw[0] + raw[0], 16),
+      parseInt(raw[1] + raw[1], 16),
+      parseInt(raw[2] + raw[2], 16),
+    ];
+  }
+  return [
+    parseInt(raw.slice(0, 2), 16) || 0,
+    parseInt(raw.slice(2, 4), 16) || 0,
+    parseInt(raw.slice(4, 6), 16) || 0,
+  ];
+}
+
+function mixHex(hex: string, other: [number, number, number], amount: number) {
+  const [r, g, b] = parseHexColor(hex);
+  const t = Math.max(0, Math.min(1, amount));
+  const toHex = (c: number, o: number) =>
+    clampByte(c * (1 - t) + o * t).toString(16).padStart(2, '0');
+  return `#${toHex(r, other[0])}${toHex(g, other[1])}${toHex(b, other[2])}`;
+}
+
+/** Mix a team base color with white so any team (3+) gets matching pastels. */
+function pastelFromTeamColor(base: string) {
+  const white: [number, number, number] = [255, 255, 255];
+  const black: [number, number, number] = [0, 0, 0];
+  return {
+    track: mixHex(base, white, 0.92),
+    trackBorder: mixHex(base, white, 0.72),
+    fillStart: mixHex(base, white, 0.58),
+    fillEnd: mixHex(base, white, 0.38),
+    flag: mixHex(base, white, 0.28),
+    btnBorder: mixHex(base, white, 0.38),
+    btnFill: mixHex(base, white, 0.82),
+    text: mixHex(base, black, 0.32),
+  };
 }
 
 function raceIonicon(icon?: string): keyof typeof Ionicons.glyphMap {
@@ -117,17 +164,7 @@ function scoreFromTeamSelection(selectionRoot: any, teamId: number, totalQuestio
   const node =
     selectionRoot[`team_${teamId}`] ?? selectionRoot[teamId] ?? selectionRoot[String(teamId)];
   if (!node || typeof node !== 'object') return 0;
-  const seen = new Set<string>();
-  let correctCount = 0;
-  Object.entries(node).forEach(([key, value]: [string, any]) => {
-    if (!value || !String(key).startsWith('question_')) return;
-    if (value.submitted !== true && value.submitted !== 'true') return;
-    const questionId = String(key).slice('question_'.length);
-    if (!questionId || seen.has(questionId)) return;
-    seen.add(questionId);
-    if (value.isCorrect === true) correctCount += 1;
-  });
-  return Math.round((correctCount / n) * 100);
+  return spaceRaceTeamPercentFromSelections(node, n).score;
 }
 
 function questionsForScoringFromRace(raceData: any, teamScoresRaw: any) {
@@ -193,6 +230,8 @@ export default function SpaceRaceDisplayScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const raceId = String(id || '');
   const insets = useSafeAreaInsets();
+  const { width: windowWidth } = useWindowDimensions();
+  const hideJoinTimeWords = windowWidth <= 360;
   const [expandedTeams, setExpandedTeams] = useState<Record<string, true>>({});
 
   const { value: raceRtdb, loading: raceLoading } = useRtdbValue(
@@ -292,13 +331,17 @@ export default function SpaceRaceDisplayScreen() {
           { paddingBottom: TAB_BAR_CONTENT_HEIGHT + insets.bottom + SPACING[6] },
         ]}>
         <View style={styles.headerCard}>
-          <Text style={styles.raceTitle} numberOfLines={3}>
-            {raceData.title || 'Space Race'}
-          </Text>
-          <View style={styles.joinTimeRow}>
-            <Ionicons name="time-outline" size={16} color={COLORS.darkTextSecondary} />
-            <Text style={styles.joinTimeLabel}>Join Time:</Text>
-            <JoinDurationTimer raceData={raceData} />
+          <View style={styles.headerRow}>
+            <Text style={styles.raceTitle} numberOfLines={1} ellipsizeMode="tail">
+              {raceData.title || 'Space Race'}
+            </Text>
+            <View style={styles.joinTimeRow}>
+              <Ionicons name="time-outline" size={16} color={COLORS.darkTextSecondary} />
+              {hideJoinTimeWords ? null : (
+                <Text style={styles.joinTimeLabel}>Join Time:</Text>
+              )}
+              <JoinDurationTimer raceData={raceData} />
+            </View>
           </View>
         </View>
 
@@ -311,11 +354,12 @@ export default function SpaceRaceDisplayScreen() {
 
           {teams.map(({ teamId, score }) => {
             const style = getTeamStyle(teamId);
+            const pastel = pastelFromTeamColor(style.fill);
             const members = getTeamParticipants(teamId);
             const percentage =
               maxPossibleScore > 0 ? Math.min((score / maxPossibleScore) * 100, 100) : 0;
             const expanded = Boolean(expandedTeams[String(teamId)]);
-            const iconLeft = Math.min(Math.max(percentage, 8), 92);
+            const fillWidth = `${percentage}%`;
 
             return (
               <View key={teamId} style={styles.teamBlock}>
@@ -323,74 +367,69 @@ export default function SpaceRaceDisplayScreen() {
                   <View style={styles.teamNameWrap}>
                     <View style={[styles.dot, { backgroundColor: style.fill }]} />
                     <Text
-                      style={[styles.teamName, { color: style.text }]}
+                      style={[styles.teamName, { color: pastel.text }]}
                       numberOfLines={1}
                       ellipsizeMode="tail">
                       {style.label} Team
                     </Text>
                   </View>
-                  <TouchableOpacity
+                  <Pressable
                     onPress={() => toggleTeamMembers(teamId)}
-                    style={[
+                    hitSlop={4}
+                    style={({ pressed }) => [
                       styles.membersBtn,
                       expanded
                         ? {
-                            backgroundColor: style.softBg,
-                            borderColor: style.softBorder,
+                            backgroundColor: pastel.btnFill,
+                            borderColor: pastel.btnBorder,
                           }
-                        : styles.membersBtnIdle,
+                        : {
+                            backgroundColor: COLORS.white,
+                            borderColor: pastel.btnBorder,
+                          },
+                      pressed && styles.membersBtnPressed,
                     ]}
                     accessibilityRole="button"
-                    accessibilityLabel="Show Members">
-                    <Ionicons
-                      name="people-outline"
-                      size={16}
-                      color={expanded ? style.text : COLORS.darkTextSecondary}
-                    />
-                    <Text
-                      style={[
-                        styles.membersBtnLabel,
-                        { color: expanded ? style.text : COLORS.darkTextSecondary },
-                      ]}>
-                      Show Members
+                    accessibilityState={{ expanded }}
+                    accessibilityLabel={
+                      expanded
+                        ? `Hide members of ${style.label} Team`
+                        : `Show members of ${style.label} Team`
+                    }>
+                    <Ionicons name="people-outline" size={16} color={pastel.text} />
+                    <Text style={[styles.membersBtnLabel, { color: pastel.text }]}>
+                      {expanded ? 'Hide Members' : 'Show Members'}
                     </Text>
-                    <Ionicons
-                      name={expanded ? 'chevron-up' : 'chevron-down'}
-                      size={14}
-                      color={expanded ? style.text : COLORS.darkTextSecondary}
-                    />
-                  </TouchableOpacity>
+                  </Pressable>
                 </View>
 
                 <View
                   style={[
                     styles.track,
-                    { backgroundColor: style.track, borderColor: style.border },
+                    { backgroundColor: pastel.track, borderColor: pastel.trackBorder },
                   ]}>
-                  <View
+                  <LinearGradient
+                    colors={[pastel.fillStart, pastel.fillEnd]}
+                    start={{ x: 0, y: 0.5 }}
+                    end={{ x: 1, y: 0.5 }}
                     style={[
                       styles.trackFill,
                       {
-                        width: `${percentage}%`,
-                        minWidth: percentage > 0 ? 40 : 0,
-                        backgroundColor: style.fill,
+                        width: fillWidth,
+                        minWidth: 42,
                       },
-                    ]}
-                  />
-                  <View
-                    style={[
-                      styles.iconBubble,
-                      { left: `${iconLeft}%`, backgroundColor: style.fill },
                     ]}>
-                    <Ionicons name={iconName} size={18} color={COLORS.white} />
-                  </View>
+                    <View style={styles.iconBubble}>
+                      <Ionicons name={iconName} size={16} color={pastel.flag} />
+                    </View>
+                  </LinearGradient>
                 </View>
 
                 <View style={styles.statsRow}>
-                  <Text style={[styles.statsText, { color: style.text }]}>
+                  <Text style={[styles.statsText, { color: pastel.text }]}>
                     {members.length} participant{members.length === 1 ? '' : 's'}
                   </Text>
-                  <Text style={[styles.statsScore, { color: style.text }]}>Score: {score}</Text>
+                  <Text style={[styles.statsScore, { color: pastel.text }]}>Score: {score}</Text>
                 </View>
 
                 {expanded ? (
@@ -447,10 +486,16 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.cardBorder,
     paddingHorizontal: SPACING[4],
-    paddingVertical: SPACING[3],
-    gap: SPACING[2],
+    paddingVertical: 15,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
   },
   raceTitle: {
+    flex: 1,
+    minWidth: 0,
     color: COLORS.text,
     fontSize: 17,
     fontWeight: FONT_WEIGHTS.semibold,
@@ -462,7 +507,12 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   joinTimeLabel: { color: COLORS.darkTextSecondary, fontSize: 14 },
-  joinTimeValue: { color: COLORS.text, fontSize: 14, fontWeight: FONT_WEIGHTS.medium },
+  joinTimeValue: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: FONT_WEIGHTS.bold,
+    fontVariant: ['tabular-nums'],
+  },
   boardCard: {
     backgroundColor: COLORS.white,
     borderRadius: 14,
@@ -483,7 +533,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginTop: -SPACING[3],
   },
-  teamBlock: { gap: SPACING[2] },
+  teamBlock: { gap: 8 },
   teamRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -506,41 +556,43 @@ const styles = StyleSheet.create({
   membersBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 10,
+    gap: 6,
+    paddingHorizontal: 18,
     minHeight: 44,
-    borderRadius: 10,
-    borderWidth: 1,
+    height: 44,
+    minWidth: 148,
+    borderRadius: 16,
+    borderWidth: 2,
     flexShrink: 0,
   },
-  membersBtnIdle: {
-    backgroundColor: '#F9FAFB',
-    borderColor: COLORS.border,
-  },
+  membersBtnPressed: { opacity: 0.82 },
   membersBtnLabel: {
     fontSize: 13,
-    fontWeight: FONT_WEIGHTS.medium,
+    fontWeight: FONT_WEIGHTS.semibold,
   },
   track: {
-    height: 52,
-    borderRadius: 999,
-    borderWidth: 2,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 1.5,
     justifyContent: 'center',
     overflow: 'hidden',
   },
   trackFill: {
     height: '100%',
-    borderRadius: 999,
+    borderRadius: 22,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingLeft: 5,
+    paddingRight: 5,
   },
   iconBubble: {
-    position: 'absolute',
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    marginLeft: -18,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.white,
     alignItems: 'center',
     justifyContent: 'center',
-    top: 6,
   },
   statsRow: {
     flexDirection: 'row',

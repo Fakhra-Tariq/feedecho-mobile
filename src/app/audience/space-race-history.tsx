@@ -13,7 +13,15 @@ import {
   View,
 } from 'react-native';
 
-import { showAlert } from '@/components/feedback';
+import { showAlert, showToast } from '@/components/feedback';
+import {
+  DOWNLOAD_FAILED_MESSAGE,
+  resolveFileDownloadUrl,
+} from '@/lib/downloadAndOpenFile';
+import {
+  SAVE_PERMISSION_MESSAGE,
+  saveResourceToDevice,
+} from '@/lib/saveResourceToDevice';
 import { COLORS, FONT_WEIGHTS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { formatSessionDate } from '@/lib/formatLocalDateTime';
@@ -50,7 +58,7 @@ function mapResource(resource: any, index: number): Resource {
     id: String(resource.id || resource.resourceId || `res-${index}`),
     type: resource.type || 'file',
     fileName: resource.fileName || resource.name || resource.linkTitle || 'Resource',
-    url: resource.url || resource.downloadUrl || '',
+    url: resolveFileDownloadUrl(resource),
     senderName: resource.senderName || resource.sharedBy || '',
     linkTitle: resource.linkTitle,
     text: resource.text,
@@ -93,6 +101,7 @@ export default function SpaceRaceHistoryScreen() {
   const [resourceToDelete, setResourceToDelete] = useState<{ raceId: string; resource: Resource } | null>(
     null
   );
+  const [downloadingKeys, setDownloadingKeys] = useState<string[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -152,6 +161,40 @@ export default function SpaceRaceHistoryScreen() {
       return;
     }
     await Linking.openURL(url);
+  };
+
+  const downloadResource = async (resource: Resource) => {
+    const key = `${resource.id}:${resource.fileName}`;
+    if (downloadingKeys.includes(key)) return;
+    const url = resolveFileDownloadUrl(resource);
+    if (!url) {
+      showAlert({
+        type: 'warning',
+        title: 'Unavailable',
+        message: 'This resource has no download link.',
+        primary: { label: 'Close' },
+      });
+      return;
+    }
+    setDownloadingKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
+    try {
+      const result = await saveResourceToDevice({
+        url,
+        fileName: resource.fileName,
+        resourceType: resource.type,
+      });
+      if (result.status === 'saved') {
+        showToast({ type: 'success', title: result.message });
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error && error.name === 'DownloadPermissionError'
+          ? SAVE_PERMISSION_MESSAGE
+          : DOWNLOAD_FAILED_MESSAGE;
+      showToast({ type: 'info', title: message });
+    } finally {
+      setDownloadingKeys((prev) => prev.filter((item) => item !== key));
+    }
   };
 
   const handleToggle = (raceId: string) => {
@@ -332,9 +375,16 @@ export default function SpaceRaceHistoryScreen() {
                                       <Pressable
                                         style={styles.actionBtn}
                                         onPress={() => {
-                                          if (!resource.url || resource.url === '#') return;
+                                          const previewUrl = resolveFileDownloadUrl(resource);
+                                          if (!previewUrl) {
+                                            showToast({
+                                              type: 'info',
+                                              title: 'This image has no preview.',
+                                            });
+                                            return;
+                                          }
                                           setPreviewImage({
-                                            url: resource.url,
+                                            url: previewUrl,
                                             fileName: resource.fileName || 'Shared image',
                                           });
                                         }}>
@@ -344,14 +394,30 @@ export default function SpaceRaceHistoryScreen() {
                                     ) : null}
                                     {resource.type !== 'link' ? (
                                       <Pressable
-                                        style={styles.actionBtn}
-                                        onPress={() => openUrl(resource.url)}>
-                                        <Ionicons name="download-outline" size={14} color={COLORS.primary} />
-                                        <Text style={styles.actionBtnText}>Download</Text>
+                                        style={[
+                                          styles.actionBtn,
+                                          downloadingKeys.includes(`${resource.id}:${resource.fileName}`) &&
+                                            styles.actionBtnBusy,
+                                        ]}
+                                        disabled={downloadingKeys.includes(
+                                          `${resource.id}:${resource.fileName}`
+                                        )}
+                                        onPress={() => downloadResource(resource)}>
+                                        {downloadingKeys.includes(`${resource.id}:${resource.fileName}`) ? (
+                                          <ActivityIndicator size="small" color={COLORS.primary} />
+                                        ) : (
+                                          <Ionicons name="download-outline" size={14} color={COLORS.primary} />
+                                        )}
+                                        <Text style={styles.actionBtnText}>
+                                          {downloadingKeys.includes(`${resource.id}:${resource.fileName}`)
+                                            ? 'Downloading...'
+                                            : 'Download'}
+                                        </Text>
                                       </Pressable>
                                     ) : null}
                                     <Pressable
                                       style={styles.trashBtn}
+                                      hitSlop={6}
                                       onPress={() => setResourceToDelete({ raceId: session.raceId, resource })}
                                       accessibilityLabel="Delete resource">
                                       <Ionicons name="trash-outline" size={16} color="#9CA3AF" />
@@ -379,7 +445,10 @@ export default function SpaceRaceHistoryScreen() {
               <Text style={styles.previewTitle} numberOfLines={1}>
                 {previewImage?.fileName || 'Image preview'}
               </Text>
-              <Pressable onPress={() => setPreviewImage(null)} hitSlop={8}>
+              <Pressable
+                onPress={() => setPreviewImage(null)}
+                accessibilityLabel="Close preview"
+                style={styles.previewClose}>
                 <Ionicons name="close" size={22} color={COLORS.mutedText} />
               </Pressable>
             </View>
@@ -558,15 +627,17 @@ const styles = StyleSheet.create({
   actionBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 4,
-    minHeight: 40,
+    minHeight: 44,
     paddingHorizontal: 12,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: 'rgba(109,65,95,0.3)',
   },
+  actionBtnBusy: { opacity: 0.7 },
   actionBtnText: { fontSize: 13, fontWeight: FONT_WEIGHTS.medium, color: COLORS.primary },
-  trashBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
+  trashBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   overlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.55)',
@@ -588,7 +659,13 @@ const styles = StyleSheet.create({
     borderBottomColor: '#E8E0F0',
   },
   previewTitle: { flex: 1, fontWeight: FONT_WEIGHTS.medium, color: '#1a1a1a', marginRight: 8 },
-  previewImg: { width: '100%', height: 320, backgroundColor: '#F9FAFB' },
+  previewClose: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  previewImg: { width: '100%', height: 360, backgroundColor: '#F9FAFB' },
   deleteCard: {
     backgroundColor: COLORS.white,
     borderRadius: 12,

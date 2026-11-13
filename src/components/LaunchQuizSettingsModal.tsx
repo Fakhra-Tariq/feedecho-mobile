@@ -11,13 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-
-import {
-  KEYBOARD_BOTTOM_GAP,
-  KEYBOARD_SCROLL_PROPS,
-  KeyboardSafeScreen,
-} from '@/components/KeyboardSafeScreen';
+import { KeyboardModalFrame } from '@/components/KeyboardSafeScreen';
 import { COLORS, FONT_WEIGHTS, SHADOWS, SPACING } from '@/constants/theme';
 import { useHostSessions } from '@/context/HostSessionContext';
 import {
@@ -52,7 +46,6 @@ export function LaunchQuizSettingsModal({
   onClose,
   onLaunched,
 }: Props) {
-  const insets = useSafeAreaInsets();
   const { activeSession } = useHostSessions();
   const [timeLimit, setTimeLimit] = useState<number | null>(null);
   const [timePerStudent, setTimePerStudent] = useState<number | null>(null);
@@ -139,15 +132,7 @@ export function LaunchQuizSettingsModal({
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <KeyboardSafeScreen variant="modal" scroll={false} style={styles.screen}>
-        <View
-          style={[
-            styles.sheetWrap,
-            {
-              paddingTop: Math.max(insets.top, SPACING[3]),
-              paddingBottom: Math.max(insets.bottom, SPACING[3]),
-            },
-          ]}>
+      <KeyboardModalFrame style={styles.screen} scrollChildren={false}>
           <View style={styles.card}>
             <View style={styles.header}>
               <Text style={styles.title}>Quiz Settings</Text>
@@ -163,8 +148,11 @@ export function LaunchQuizSettingsModal({
 
             <ScrollView
               style={styles.body}
-              contentContainerStyle={[styles.content, { paddingBottom: KEYBOARD_BOTTOM_GAP }]}
-              {...KEYBOARD_SCROLL_PROPS}>
+              contentContainerStyle={styles.content}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
+              automaticallyAdjustKeyboardInsets={false}
+              showsVerticalScrollIndicator={false}>
               <View style={styles.panel}>
                 <MinuteField
                   label="Quiz live for"
@@ -195,7 +183,12 @@ export function LaunchQuizSettingsModal({
                   value={showFinalScore}
                   onChange={setShowFinalScore}
                 />
-                <ToggleRow label="One attempt only" value={oneAttempt} onChange={setOneAttempt} />
+                <ToggleRow
+                  label="One attempt only"
+                  badge="PRO"
+                  value={oneAttempt}
+                  onChange={setOneAttempt}
+                />
               </View>
               {error ? <Text style={styles.error}>{error}</Text> : null}
             </ScrollView>
@@ -221,8 +214,7 @@ export function LaunchQuizSettingsModal({
               </TouchableOpacity>
             </View>
           </View>
-        </View>
-      </KeyboardSafeScreen>
+      </KeyboardModalFrame>
     </Modal>
   );
 }
@@ -326,18 +318,31 @@ function MinuteField({
   );
 }
 
+function ProBadge({ label }: { label: string }) {
+  return (
+    <View style={styles.proBadge} accessibilityLabel={label}>
+      <Text style={styles.proBadgeText}>{label}</Text>
+    </View>
+  );
+}
+
 function ToggleRow({
   label,
+  badge,
   value,
   onChange,
 }: {
   label: string;
+  badge?: string;
   value: boolean;
   onChange: (value: boolean) => void;
 }) {
   return (
     <View style={styles.toggleRow}>
-      <Text style={styles.toggleLabel}>{label}</Text>
+      <View style={styles.toggleLabelGroup}>
+        <Text style={styles.toggleLabel}>{label}</Text>
+        {badge ? <ProBadge label={badge} /> : null}
+      </View>
       <Switch
         value={value}
         onValueChange={onChange}
@@ -350,11 +355,7 @@ function ToggleRow({
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: COLORS.background },
-  sheetWrap: {
-    flex: 1,
-    paddingHorizontal: SPACING[4],
-  },
+  screen: { flex: 1, backgroundColor: COLORS.background, paddingHorizontal: SPACING[4] },
   card: {
     flex: 1,
     backgroundColor: COLORS.white,
@@ -435,7 +436,34 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     minHeight: 44,
   },
-  toggleLabel: { color: COLORS.text, fontWeight: FONT_WEIGHTS.medium, fontSize: 14, flex: 1, paddingRight: 8 },
+  toggleLabelGroup: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingRight: 8,
+  },
+  toggleLabel: {
+    color: COLORS.text,
+    fontWeight: FONT_WEIGHTS.medium,
+    fontSize: 14,
+    flexShrink: 1,
+  },
+  proBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: '#F3E8FF',
+    flexShrink: 0,
+  },
+  proBadgeText: {
+    color: '#7E22CE',
+    fontSize: 12,
+    fontWeight: FONT_WEIGHTS.semibold,
+    letterSpacing: 0.4,
+  },
   error: { color: COLORS.dangerText, marginTop: SPACING[3] },
   footer: {
     paddingHorizontal: SPACING[5],

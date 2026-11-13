@@ -3,11 +3,11 @@ import { useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
-  TouchableOpacity,
   View,
 } from 'react-native';
 
@@ -15,8 +15,10 @@ import {
   KEYBOARD_BOTTOM_GAP,
   KeyboardSafeScreen,
 } from '@/components/KeyboardSafeScreen';
+import { GuestProgressLoginBanner } from '@/components/Audience/GuestProgressLoginBanner';
+import { QuizQuestionNavButtons } from '@/components/Audience/QuizQuestionNavButtons';
 import { showAlert } from '@/components/feedback';
-import { AppButton, AppCard } from '@/components/ui';
+import { AppButton } from '@/components/ui';
 import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING, TYPE } from '@/constants/theme';
 import { cleanErrorMessage } from '@/lib/activeActivity';
 import { useAuth } from '@/context/AuthContext';
@@ -32,9 +34,17 @@ import {
 import { submitQuizWithRetry } from '@/lib/audienceQuizSubmit';
 import {
   applyQuizShuffleSettings,
+  getStudentAttemptSecondsRemaining,
   isQuizJoinWindowExpired,
   resolveRegularQuizTimeLeft,
 } from '@/lib/quizLaunchAudienceSettings';
+import {
+  getMyParticipation,
+  hasGuestSubmitted,
+  markQuizAttemptSubmitted,
+  saveQuizAttemptProgress,
+} from '@/lib/studentParticipation';
+import { getPerformanceComment } from '@/lib/spaceRaceResultStats';
 import {
   calculateScore,
   getStableQuestionId,
@@ -76,14 +86,26 @@ function optionText(option: any) {
   return option?.text ?? option?.label ?? String(option ?? '');
 }
 
-/** Same copy as Web AudienceQuizAttempt getPerformanceComment. */
-function getPerformanceComment(percentage: number) {
-  if (percentage >= 90) return "Outstanding! You're a star performer! 🌟";
-  if (percentage >= 80) return 'Excellent work! You really know your stuff! 🎯';
-  if (percentage >= 65) return 'Great job! Keep up the good work! 👏';
-  if (percentage >= 50) return 'Good effort! Room for improvement! 💪';
-  if (percentage >= 35) return 'Nice try! Keep practicing! 📚';
-  return "Keep learning! You'll do better next time! 🌱";
+function remainingFromOriginalStart(quizData: any, startedAtIso?: string | null) {
+  const settings = quizData?.launchSettings || {};
+  if (settings.timePerStudentMinutes) {
+    return getStudentAttemptSecondsRemaining(settings, startedAtIso);
+  }
+  if (settings.timeLimit != null) {
+    const startMs = startedAtIso ? new Date(startedAtIso).getTime() : Date.now();
+    const elapsed = Math.floor((Date.now() - startMs) / 1000);
+    const total = Number(settings.timeLimit) * 60;
+    let remaining = Math.max(0, total - elapsed);
+    if (settings.endTime) {
+      const quizEndRemaining = Math.max(
+        0,
+        Math.floor((new Date(settings.endTime).getTime() - Date.now()) / 1000)
+      );
+      remaining = Math.min(remaining, quizEndRemaining);
+    }
+    return remaining;
+  }
+  return resolveRegularQuizTimeLeft(quizData, startedAtIso);
 }
 
 /**
@@ -94,8 +116,10 @@ function getPerformanceComment(percentage: number) {
 export default function AudienceQuizScreen() {
   const { profile } = useAuth();
   const isGuest = Boolean(profile?.guest);
-  const params = useLocalSearchParams<{ quizId?: string }>();
+  const params = useLocalSearchParams<{ quizId?: string; alreadySubmitted?: string }>();
   const quizIdParam = String(params.quizId || '');
+  const alreadySubmittedParam = String(params.alreadySubmitted || '') === '1';
+  const isLoggedInStudent = Boolean(profile?.uid && !profile?.guest);
   const { leave: goHome } = useLeaveActivity();
   const leftResultRef = useRef(false);
   const [redirectCountdown, setRedirectCountdown] = useState(10);
@@ -118,6 +142,10 @@ export default function AudienceQuizScreen() {
   const [syncError, setSyncError] = useState('');
   const quizStartedAtRef = useRef<number | null>(null);
   const autoSubmitRef = useRef(false);
+  const progressSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const answersRef = useRef<Record<string, any>>({});
+  const currentQuestionRef = useRef(0);
+  const originalParticipantIdRef = useRef<string | null>(null);
 
   const leaveHomeOnce = () => {
     if (leftResultRef.current) return;
@@ -132,6 +160,57 @@ export default function AudienceQuizScreen() {
       setError('');
       try {
         const stored = await readStudentQuizSession();
+        const targetQuizId = quizIdParam || String(stored?.quizId || '');
+        let participation: Awaited<ReturnType<typeof getMyParticipation>> | null = null;
+        if (isLoggedInStudent && profile?.uid && targetQuizId) {
+          participation = await getMyParticipation('quiz', targetQuizId, String(profile.uid), {
+            email: profile.email,
+            name: profile.name,
+          });
+        }
+
+        const openSubmitted = (quizData: any, result?: { percentage: number; correctAnswers: number; totalQuestions: number }) => {
+          if (cancelled) return;
+          setQuiz(
+            quizData || {
+              id: targetQuizId,
+              title: 'Quiz',
+              launchSettings: { showFinalScore: Boolean(result?.totalQuestions) },
+            }
+          );
+          if (result) setResultScore(result);
+          else {
+            setResultScore({ percentage: 0, correctAnswers: 0, totalQuestions: 0 });
+            setQuiz((prev: any) => ({
+              ...(prev || {}),
+              launchSettings: { ...(prev?.launchSettings || {}), showFinalScore: false },
+            }));
+          }
+          setIsSubmitted(true);
+        };
+
+        if (isLoggedInStudent && (alreadySubmittedParam || participation?.status === 'submitted')) {
+          const foundQuiz = stored?.quiz && String(stored.quizId) === String(targetQuizId) ? stored.quiz : null;
+          if (foundQuiz && isQuizJoinWindowExpired(foundQuiz.launchSettings)) {
+            if (!cancelled) setError('This quiz is no longer joinable.');
+            return;
+          }
+          openSubmitted(
+            foundQuiz
+              ? {
+                  ...foundQuiz,
+                  id: foundQuiz.id || targetQuizId,
+                  type: normalizeQuizTypeLabel(foundQuiz.type),
+                  questions: normalizeQuestionsList(foundQuiz.questions),
+                  launched: true,
+                }
+              : null,
+            participation?.result
+          );
+          if (stored && String(stored.quizId) === String(targetQuizId)) setSession(stored);
+          return;
+        }
+
         if (!stored?.isLocked || !stored.quizId) {
           if (!cancelled) {
             setError('No active quiz session. Please join with a session code.');
@@ -155,6 +234,7 @@ export default function AudienceQuizScreen() {
           return;
         }
         if (
+          !isLoggedInStudent &&
           foundQuiz.launchSettings?.oneAttempt &&
           (await hasLocalQuizSubmission(String(stored.quizId), {
             participantId: stored.participantId,
@@ -167,6 +247,8 @@ export default function AudienceQuizScreen() {
           return;
         }
 
+        const resume = isLoggedInStudent ? participation?.progress : undefined;
+        const shuffleSeed = resume?.originalParticipantId || stored.participantId;
         let quizToUse = {
           ...foundQuiz,
           id: foundQuiz.id || stored.quizId,
@@ -174,13 +256,41 @@ export default function AudienceQuizScreen() {
           questions: normalizeQuestionsList(foundQuiz.questions),
           launched: true,
         };
-        quizToUse = applyQuizShuffleSettings(quizToUse, stored.participantId);
+        quizToUse = applyQuizShuffleSettings(quizToUse, shuffleSeed);
+
+        const startedAtIso = resume?.startedAt || stored.joinedAt;
+        const startMs = startedAtIso ? new Date(startedAtIso).getTime() : Date.now();
+        const restoredAnswers =
+          resume?.answers && typeof resume.answers === 'object' ? { ...resume.answers } : {};
+        const restoredIndex = Math.min(
+          Math.max(0, Number(resume?.currentQuestion || 0)),
+          Math.max(0, quizToUse.questions.length - 1)
+        );
 
         if (!cancelled) {
           setSession(stored);
           setQuiz(quizToUse);
-          setTimeLeft(resolveRegularQuizTimeLeft(quizToUse, stored.joinedAt));
-          quizStartedAtRef.current = Date.now();
+          setAnswers(restoredAnswers);
+          answersRef.current = restoredAnswers;
+          setCurrentQuestion(restoredIndex);
+          currentQuestionRef.current = restoredIndex;
+          originalParticipantIdRef.current = String(shuffleSeed || stored.participantId || '');
+          const remaining = isLoggedInStudent
+            ? remainingFromOriginalStart(quizToUse, startedAtIso)
+            : resolveRegularQuizTimeLeft(quizToUse, stored.joinedAt);
+          setTimeLeft(remaining);
+          quizStartedAtRef.current = Number.isFinite(startMs) ? startMs : Date.now();
+          if (isLoggedInStudent && profile?.uid && !resume) {
+            void saveQuizAttemptProgress({
+              quizId: String(stored.quizId),
+              uid: String(profile.uid),
+              status: 'in_progress',
+              currentQuestion: 0,
+              answers: {},
+              startedAt: startedAtIso || new Date().toISOString(),
+              originalParticipantId: stored.participantId,
+            });
+          }
         }
       } catch {
         if (!cancelled) setError('Failed to load quiz');
@@ -191,7 +301,14 @@ export default function AudienceQuizScreen() {
     return () => {
       cancelled = true;
     };
-  }, [quizIdParam]);
+  }, [
+    quizIdParam,
+    alreadySubmittedParam,
+    isLoggedInStudent,
+    profile?.uid,
+    profile?.email,
+    profile?.name,
+  ]);
 
   useEffect(() => {
     if (timeLeft == null || isSubmitted) return undefined;
@@ -241,9 +358,33 @@ export default function AudienceQuizScreen() {
   }).length;
   const progress = questions.length ? (answeredCount / questions.length) * 100 : 0;
 
+  const persistProgressSoon = (nextAnswers: Record<string, any>, nextIndex: number) => {
+    if (!isLoggedInStudent || !profile?.uid || !quiz?.id || isSubmitted) return;
+    if (progressSaveTimerRef.current) clearTimeout(progressSaveTimerRef.current);
+    progressSaveTimerRef.current = setTimeout(() => {
+      const startedAt = quizStartedAtRef.current
+        ? new Date(quizStartedAtRef.current).toISOString()
+        : new Date().toISOString();
+      void saveQuizAttemptProgress({
+        quizId: String(quiz.id),
+        uid: String(profile.uid),
+        status: 'in_progress',
+        currentQuestion: nextIndex,
+        answers: nextAnswers,
+        startedAt,
+        originalParticipantId: originalParticipantIdRef.current || session?.participantId || null,
+      });
+    }, 400);
+  };
+
   const setAnswer = (value: any) => {
-    if (!questionKey) return;
-    setAnswers((prev) => ({ ...prev, [questionKey]: value }));
+    if (!questionKey || isSubmitted || isSubmitting) return;
+    setAnswers((prev) => {
+      const next = { ...prev, [questionKey]: value };
+      answersRef.current = next;
+      persistProgressSoon(next, currentQuestionRef.current);
+      return next;
+    });
   };
 
   const currentAnswer =
@@ -253,8 +394,37 @@ export default function AudienceQuizScreen() {
     answers[String(currentQuestion)] ??
     '';
 
+  const hasAnyAnswer = () =>
+    questions.some((q: any, index: number) => {
+      const key = getStableQuestionId(q, index);
+      const value = answers[key] ?? answers[String(key)] ?? answers[index] ?? answers[String(index)];
+      return value != null && String(value).trim() !== '';
+    });
+
   const onSubmit = async () => {
     if (!quiz || isSubmitting || isSubmitted) return;
+    if (isLoggedInStudent && profile?.uid) {
+      const part = await getMyParticipation('quiz', String(quiz.id), String(profile.uid), {
+        email: profile.email,
+        name: profile.name,
+      });
+      if (part.status === 'submitted') {
+        if (part.result) setResultScore(part.result);
+        else setResultScore({ percentage: 0, correctAnswers: 0, totalQuestions: quiz.questions?.length || 0 });
+        setIsSubmitted(true);
+        return;
+      }
+    }
+    if (isGuest) {
+      const guestName = session?.studentName || profile?.name || '';
+      try {
+        if (guestName && (await hasGuestSubmitted('quiz', String(quiz.id), guestName))) {
+          return;
+        }
+      } catch (checkErr) {
+        console.warn('[guest submit check] network error, allowing submit', checkErr);
+      }
+    }
     setIsSubmitting(true);
     try {
       const validation = validateQuizData(quiz);
@@ -373,6 +543,9 @@ export default function AudienceQuizScreen() {
           totalQuestions: totalQuestions || quiz.questions.length,
         });
       }
+      if (isLoggedInStudent && profile?.uid) {
+        await markQuizAttemptSubmitted(String(profile.uid), String(quiz.id));
+      }
       setIsSubmitted(true);
     } catch (err) {
       showAlert({
@@ -394,7 +567,7 @@ export default function AudienceQuizScreen() {
     );
   }
 
-  if (error || !quiz || questions.length === 0) {
+  if (!isSubmitted && (error || !quiz || questions.length === 0)) {
     return (
       <View style={styles.centered}>
         <Ionicons name="alert-circle-outline" size={48} color={COLORS.iconMuted} />
@@ -408,10 +581,10 @@ export default function AudienceQuizScreen() {
     );
   }
 
-  if (isSubmitted && resultScore) {
-    const displayScore = resultScore.correctAnswers;
-    const displayTotal = resultScore.totalQuestions;
-    const displayPercentage = Math.round(resultScore.percentage ?? 0);
+  if (isSubmitted) {
+    const displayScore = resultScore?.correctAnswers ?? 0;
+    const displayTotal = resultScore?.totalQuestions ?? 0;
+    const displayPercentage = Math.round(resultScore?.percentage ?? 0);
     const showFinalScore = quiz?.launchSettings?.showFinalScore !== false;
     const countdownWidth = `${(redirectCountdown / 10) * 100}%`;
 
@@ -474,95 +647,125 @@ export default function AudienceQuizScreen() {
     );
   }
 
+  const hostLabel = String(
+    quiz.createdByName || quiz.hostName || quiz.teacherName || session?.studentName || 'Audience'
+  ).trim();
+  const optionLabels: string[] =
+    effectiveType === 'True / False'
+      ? ['True', 'False']
+      : (question?.options || []).map(optionText);
+  const canSubmit = hasAnyAnswer() && !isSubmitting;
+
   return (
     <KeyboardSafeScreen
       style={styles.screen}
       contentContainerStyle={[styles.content, { paddingBottom: SPACING[16] + KEYBOARD_BOTTOM_GAP }]}>
-        <View style={styles.headerBlock}>
-          <Text style={styles.heading}>{quiz.title}</Text>
-          <Text style={styles.hint}>
-            {quiz.type} · {session?.studentName || 'Audience'}
+      <GuestProgressLoginBanner visible={isGuest} />
+
+      <View style={styles.metaLine}>
+        <Text style={styles.metaTitle} numberOfLines={2}>
+          {quiz.title}
+        </Text>
+        <View style={styles.typePill}>
+          <Text style={styles.typePillText}>{quiz.type || 'Quiz'}</Text>
+        </View>
+        <Text style={styles.metaHost} numberOfLines={1}>
+          {hostLabel}
+        </Text>
+      </View>
+
+      {timeLeft != null ? (
+        <View style={styles.timerRow}>
+          <Ionicons name="time-outline" size={16} color={COLORS.primary} />
+          <Text style={styles.timerText}>Time remaining: {formatCountdown(timeLeft)}</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.card}>
+        <View style={styles.progressRow}>
+          <Text style={styles.progressLabel}>
+            Question {currentQuestion + 1} of {questions.length}
           </Text>
-          {timeLeft != null ? (
-            <View style={styles.timerRow}>
-              <Ionicons name="time-outline" size={16} color={COLORS.primary} />
-              <Text style={styles.timerText}>Time remaining: {formatCountdown(timeLeft)}</Text>
-            </View>
-          ) : null}
+          <Text style={styles.progressPct}>{Math.round(progress)}% Complete</Text>
+        </View>
+        <View style={styles.progressTrack}>
+          <View style={[styles.progressFill, { width: `${progress}%` }]} />
         </View>
 
-        <AppCard style={styles.card}>
-          <View style={styles.progressRow}>
-            <Text style={styles.progressLabel}>
-              Question {currentQuestion + 1} of {questions.length}
-            </Text>
-            <Text style={styles.progressPct}>{Math.round(progress)}% Complete</Text>
+        <View style={styles.questionRow}>
+          <View style={styles.qBadge}>
+            <Text style={styles.qBadgeText}>{currentQuestion + 1}</Text>
           </View>
-          <View style={styles.progressTrack}>
-            <View style={[styles.progressFill, { width: `${progress}%` }]} />
-          </View>
-
           <Text style={styles.questionText}>{question?.questionText || question?.text || ''}</Text>
+        </View>
 
-          {effectiveType === 'Multiple Choice' || effectiveType === 'True / False' ? (
-            <View style={styles.options}>
-              {(effectiveType === 'True / False'
-                ? ['True', 'False']
-                : (question?.options || []).map(optionText)
-              ).map((opt: string) => {
-                const selected = String(currentAnswer) === String(opt);
-                return (
-                  <TouchableOpacity
-                    key={opt}
-                    style={[styles.option, selected && styles.optionSelected]}
-                    onPress={() => setAnswer(opt)}>
-                    <Text style={[styles.optionText, selected && styles.optionTextSelected]}>
-                      {opt}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          ) : (
-            <TextInput
-              value={String(currentAnswer || '')}
-              onChangeText={setAnswer}
-              multiline={effectiveType === 'Long Answer'}
-              placeholder="Your answer"
-              placeholderTextColor={COLORS.darkTextSecondary}
-              style={[styles.input, effectiveType === 'Long Answer' && styles.multiline]}
-            />
-          )}
-
-          <View style={styles.navRow}>
-            <AppButton
-              label="Previous"
-              variant="ghost"
-              fullWidth={false}
-              disabled={currentQuestion === 0}
-              onPress={() => setCurrentQuestion((i) => Math.max(0, i - 1))}
-              style={styles.navBtn}
-            />
-            {currentQuestion < questions.length - 1 ? (
-              <AppButton
-                label="Next"
-                fullWidth={false}
-                onPress={() =>
-                  setCurrentQuestion((i) => Math.min(questions.length - 1, i + 1))
-                }
-                style={styles.navBtn}
-              />
-            ) : (
-              <AppButton
-                label={isSubmitting ? 'Submitting...' : 'Submit'}
-                loading={isSubmitting}
-                fullWidth={false}
-                onPress={onSubmit}
-                style={styles.navBtn}
-              />
-            )}
+        {effectiveType === 'Multiple Choice' || effectiveType === 'True / False' ? (
+          <View style={styles.options}>
+            {optionLabels.map((opt: string) => {
+              const selected = String(currentAnswer) === String(opt);
+              return (
+                <Pressable
+                  key={opt}
+                  onPress={() => setAnswer(opt)}
+                  style={[styles.option, selected && styles.optionSelected]}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected }}>
+                  <View style={[styles.radio, selected && styles.radioOn]}>
+                    {selected ? <View style={styles.radioDot} /> : null}
+                  </View>
+                  <Text style={[styles.optionText, selected && styles.optionTextSelected]}>
+                    {opt}
+                  </Text>
+                </Pressable>
+              );
+            })}
           </View>
-        </AppCard>
+        ) : (
+          <TextInput
+            value={String(currentAnswer || '')}
+            onChangeText={setAnswer}
+            multiline={effectiveType === 'Long Answer'}
+            placeholder="Your answer"
+            placeholderTextColor={COLORS.darkTextSecondary}
+            style={[styles.input, effectiveType === 'Long Answer' && styles.multiline]}
+          />
+        )}
+
+        <QuizQuestionNavButtons
+          previousDisabled={currentQuestion === 0}
+          onPrevious={() => {
+            setCurrentQuestion((i) => {
+              const next = Math.max(0, i - 1);
+              currentQuestionRef.current = next;
+              persistProgressSoon(answersRef.current, next);
+              return next;
+            });
+          }}
+          primaryLabel={
+            currentQuestion < questions.length - 1
+              ? 'Next'
+              : isSubmitting
+                ? 'Submitting...'
+                : 'Submit Quiz'
+          }
+          onPrimary={
+            currentQuestion < questions.length - 1
+              ? () => {
+                  setCurrentQuestion((i) => {
+                    const next = Math.min(questions.length - 1, i + 1);
+                    currentQuestionRef.current = next;
+                    persistProgressSoon(answersRef.current, next);
+                    return next;
+                  });
+                }
+              : onSubmit
+          }
+          primaryDisabled={currentQuestion >= questions.length - 1 && (!canSubmit || isSubmitted)}
+          primaryBusy={currentQuestion >= questions.length - 1 && isSubmitting}
+          showTrailingArrow={currentQuestion < questions.length - 1}
+          showSendIcon={currentQuestion >= questions.length - 1 && !isSubmitting}
+        />
+      </View>
     </KeyboardSafeScreen>
   );
 }
@@ -576,11 +779,39 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
     padding: SPACING[6],
   },
-  content: { padding: SPACING[6], gap: SPACING[4], paddingBottom: SPACING[16] },
-  card: { ...SHADOWS.raised },
-  headerBlock: { gap: SPACING[3] },
-  heading: { color: COLORS.text, fontSize: 24, fontWeight: FONT_WEIGHTS.bold },
-  hint: { color: COLORS.darkTextSecondary },
+  content: { padding: SPACING[4], gap: SPACING[3], paddingBottom: SPACING[16] },
+  metaLine: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: SPACING[2],
+  },
+  metaTitle: {
+    flexShrink: 1,
+    fontSize: 15,
+    fontWeight: FONT_WEIGHTS.semibold,
+    color: COLORS.text,
+  },
+  typePill: {
+    backgroundColor: COLORS.blush,
+    borderRadius: 20,
+    paddingHorizontal: SPACING[2],
+    paddingVertical: 2,
+  },
+  typePillText: {
+    fontSize: 11,
+    fontWeight: FONT_WEIGHTS.medium,
+    color: COLORS.primary,
+  },
+  metaHost: { fontSize: 13, color: COLORS.darkTextSecondary },
+  card: {
+    backgroundColor: COLORS.white,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.cardBorder,
+    padding: SPACING[4],
+    ...SHADOWS.raised,
+  },
   timerRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -607,15 +838,37 @@ const styles = StyleSheet.create({
     marginBottom: SPACING[4],
   },
   progressFill: { height: 5, backgroundColor: COLORS.primary },
+  questionRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: SPACING[3],
+    marginBottom: SPACING[4],
+  },
+  qBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.blush,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  qBadgeText: {
+    fontSize: 13,
+    fontWeight: FONT_WEIGHTS.semibold,
+    color: COLORS.primary,
+  },
   questionText: {
+    flex: 1,
     color: COLORS.text,
     fontSize: 17,
     fontWeight: FONT_WEIGHTS.semibold,
     lineHeight: 24,
-    marginBottom: SPACING[4],
   },
   options: { gap: SPACING[2] },
   option: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING[3],
     borderWidth: 1,
     borderColor: COLORS.divider,
     borderRadius: RADIUS.md,
@@ -626,7 +879,23 @@ const styles = StyleSheet.create({
     borderColor: COLORS.primary,
     backgroundColor: COLORS.blush,
   },
-  optionText: { color: COLORS.text, fontSize: 15 },
+  radio: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: COLORS.iconMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  radioOn: { borderColor: COLORS.primary },
+  radioDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: COLORS.primary,
+  },
+  optionText: { flex: 1, color: COLORS.text, fontSize: 15 },
   optionTextSelected: { color: COLORS.primary, fontWeight: FONT_WEIGHTS.semibold },
   input: {
     borderWidth: 1,
@@ -638,13 +907,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surfaceMuted,
   },
   multiline: { minHeight: 120, textAlignVertical: 'top', paddingTop: SPACING[3] },
-  navRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: SPACING[5],
-    gap: SPACING[3],
-  },
-  navBtn: { minWidth: 120 },
   errorTitle: { ...TYPE.title, textAlign: 'center', marginTop: SPACING[3] },
   error: { color: COLORS.dangerText, textAlign: 'center', marginTop: SPACING[3] },
   resultScreen: { flex: 1, backgroundColor: COLORS.background },

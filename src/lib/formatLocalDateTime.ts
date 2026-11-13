@@ -31,3 +31,10 @@ export function formatSessionDate(iso: unknown) {
     timestamp: d,
   };
 }
+
+/** Web student activity `shortDate`: "Oct 15". */
+export function formatShortDate(iso: unknown) {
+  const d = parseUtcTimestamp(iso);
+  if (!d) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}

@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { CommonActions, useFocusEffect } from "expo-router/react-navigation";
+import { useFocusEffect } from "expo-router/react-navigation";
 import { router, useLocalSearchParams, useNavigation, type Href } from 'expo-router';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { BackHandler, Pressable } from 'react-native';
@@ -14,6 +14,7 @@ import {
   readStoredActivityEntrySource,
   type ActivityEntrySource,
 } from '@/lib/activityEntrySource';
+import { clearJoinedActivityRedirect } from '@/lib/joinSessionNavigation';
 
 export type { ActivityEntrySource } from '@/lib/activityEntrySource';
 export {
@@ -27,29 +28,12 @@ export {
 const PUBLIC_HOME = '/' as Href;
 const STUDENT_HOME = '/audience' as Href;
 
-function resetToPublicHome(navigation: { getParent?: () => unknown; dispatch: (a: unknown) => void }) {
+function resetToPublicHome(_navigation?: { getParent?: () => unknown; dispatch: (a: unknown) => void }) {
   markStayOnPublicHome();
-  try {
-    let nav: { getParent?: () => unknown; dispatch: (a: unknown) => void } = navigation;
-    while (typeof nav.getParent === 'function') {
-      const parent = nav.getParent() as typeof nav | undefined;
-      if (!parent) break;
-      nav = parent;
-    }
-    nav.dispatch(
-      CommonActions.reset({
-        index: 0,
-        routes: [{ name: 'index' }],
-      })
-    );
-    return;
-  } catch {
-    // Fall through to replace.
-  }
   try {
     if (typeof router.dismissAll === 'function') router.dismissAll();
   } catch {
-    // Older stacks may not support dismissAll.
+    // Expo Router SDK 58 may not handle RESET { name: 'index' } on this stack.
   }
   router.replace(PUBLIC_HOME);
 }
@@ -81,7 +65,15 @@ export async function leaveActivity(
       else router.replace(PUBLIC_HOME);
       return;
     }
+    // Must not re-run join safety-net: lastAppliedJoinHref would bounce
+    // the student from Home back into Live Chat.
+    await clearJoinedActivityRedirect();
     clearStayOnPublicHome();
+    // TEMP DEBUG — remove after student leave-from-chat is confirmed
+    console.log('[TEMP DEBUG] leaveActivity → student Home', {
+      source: resolved,
+      isGuest: Boolean(options.isGuest),
+    });
     router.replace(STUDENT_HOME);
     return;
   }
@@ -101,7 +93,15 @@ export async function leaveActivity(
     return;
   }
 
+  // Must not re-run join safety-net: lastAppliedJoinHref would bounce
+  // the student from Home back into Live Chat.
+  await clearJoinedActivityRedirect();
   clearStayOnPublicHome();
+  // TEMP DEBUG — remove after student leave-from-chat is confirmed
+  console.log('[TEMP DEBUG] leaveActivity → student Home', {
+    source: resolved,
+    isGuest: Boolean(options.isGuest),
+  });
   router.replace(STUDENT_HOME);
 }
 
@@ -142,6 +142,11 @@ export function useLeaveActivity(options: LeaveHookOptions = {}) {
   const leave = useCallback(() => {
     if (leavingRef.current) return;
     leavingRef.current = true;
+    // TEMP DEBUG — remove after student leave-from-chat is confirmed
+    console.log('[TEMP DEBUG] leave() header/hardware back', {
+      source,
+      isGuest,
+    });
     void leaveActivity(source, {
       navigation,
       signOut,

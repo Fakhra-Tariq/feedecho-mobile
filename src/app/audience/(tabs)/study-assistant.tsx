@@ -14,6 +14,7 @@ import {
 
 import {
   KEYBOARD_SCROLL_PROPS,
+  KeyboardBottomAnchor,
   KeyboardSafeScreen,
 } from '@/components/KeyboardSafeScreen';
 import { COLORS, FONT_WEIGHTS, RADIUS, SPACING, TYPE } from '@/constants/theme';
@@ -247,7 +248,7 @@ export default function StudyAssistantScreen() {
           {sending ? (
             <Text style={styles.typing}>Assistant is typing…</Text>
           ) : null}
-          <View style={styles.composer}>
+          <KeyboardBottomAnchor style={styles.composer}>
             <TextInput
               value={input}
               onChangeText={setInput}
@@ -262,7 +263,7 @@ export default function StudyAssistantScreen() {
               disabled={!input.trim() || sending}>
               <Ionicons name="send" size={18} color={COLORS.white} />
             </TouchableOpacity>
-          </View>
+          </KeyboardBottomAnchor>
         </View>
       )}
     </KeyboardSafeScreen>

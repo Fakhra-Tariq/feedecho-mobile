@@ -16,7 +16,7 @@ import { ConfirmModal } from '@/components/ConfirmModal';
 import { KEYBOARD_SCROLL_PROPS, KeyboardSafeScreen } from '@/components/KeyboardSafeScreen';
 import { COLORS, FONT_WEIGHTS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
-import { db } from '../../../firebaseConfig';
+import { db } from '../../../../firebaseConfig';
 import { apiRequest } from '@/lib/api';
 import { normalizeQuizTypeLabel } from '@/lib/aiGeneratedQuiz';
 import {
