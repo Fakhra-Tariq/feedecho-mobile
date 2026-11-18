@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { router, type Href } from 'expo-router';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -15,6 +15,8 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ActivityCreatedModal } from '@/components/ActivityCreatedModal';
+import { CreateSessionModal } from '@/components/CreateSessionModal';
+import { HostNoSessionBanner } from '@/components/HostNoSessionBanner';
 import { KEYBOARD_SCROLL_PROPS, KeyboardSafeScreen } from '@/components/KeyboardSafeScreen';
 import { ConfirmModal } from '@/components/ConfirmModal';
 import { showAlert, showToast } from '@/components/feedback';
@@ -25,9 +27,11 @@ import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING } from '@/constants/them
 import { useAuth } from '@/context/AuthContext';
 import { useHostSessions, useSessionActivityLabel } from '@/context/HostSessionContext';
 import {
+  blockMobileLaunchIfBusy,
   cleanErrorMessage,
   showLaunchFailureAlert,
 } from '@/lib/activeActivity';
+import { ANOTHER_ACTIVITY_LIVE_HINT, liveActivityBlocksLaunch } from '@/lib/liveHostActivity';
 import {
   archiveExitTicket,
   attachQuestionsToTickets,
@@ -35,13 +39,17 @@ import {
   displayTicketStatus,
   endExitTicket,
   getExitTicketById,
-  listExitTickets,
   startExitTicket,
   ticketQuestionCount,
   type ExitTicket,
 } from '@/lib/hostExitTickets';
+import {
+  isClaimedCurrentActivity,
+  isLinkedSessionInactive,
+  type SessionMatchInput,
+} from '@/lib/sessionActivityMatch';
 import { TAB_BAR_CONTENT_HEIGHT } from '@/lib/tabBarSafeArea';
-import { useRtdbList, useRtdbValue } from '@/lib/useRtdb';
+import { useRtdbValue } from '@/lib/useRtdb';
 
 const FILTERS = [
   { id: 'all', label: 'All' },
@@ -50,12 +58,29 @@ const FILTERS = [
   { id: 'ended', label: 'Ended' },
 ] as const;
 
+function ticketListStatus(
+  ticket: ExitTicket,
+  sessions: Array<{ id?: string; sessionCode?: string; status?: string }>,
+  session?: SessionMatchInput | null
+) {
+  if (isClaimedCurrentActivity('exitticket', ticket.id, session)) return 'active';
+  const status = displayTicketStatus(ticket.status);
+  if (status === 'active' && isLinkedSessionInactive(ticket as Record<string, unknown>, sessions)) {
+    return 'ended';
+  }
+  return status;
+}
+
 /** Display-only: Active tickets first, then the existing recency order (stable). */
-function sortTicketsForDisplay(tickets: ExitTicket[]) {
+function sortTicketsForDisplay(
+  tickets: ExitTicket[],
+  sessions: Array<{ id?: string; sessionCode?: string; status?: string }>,
+  session?: SessionMatchInput | null
+) {
   const active: ExitTicket[] = [];
   const rest: ExitTicket[] = [];
   for (const ticket of tickets) {
-    if (displayTicketStatus(ticket.status) === 'active') active.push(ticket);
+    if (ticketListStatus(ticket, sessions, session) === 'active') active.push(ticket);
     else rest.push(ticket);
   }
   return [...active, ...rest];
@@ -70,23 +95,24 @@ const HOW_IT_WORKS_STEPS = [
 
 export default function ExitTicketLibraryScreen() {
   const insets = useSafeAreaInsets();
-  const { profile } = useAuth();
-  const { activeSession } = useHostSessions();
+  const { profile, user } = useAuth();
+  const {
+    activeSession,
+    createSession,
+    liveActivity,
+    sessions,
+    dataEpoch,
+    liveTickets,
+    liveTicketsLoading,
+    liveTicketsError,
+  } = useHostSessions();
   const activityStatus = useSessionActivityLabel();
-  const uid = profile?.uid || '';
+  const uid = String(user?.uid || profile?.uid || '').trim();
 
-  const { list: liveTickets, loading: liveLoading } = useRtdbList(uid ? 'exit_tickets' : null, {
+  const { value: questionsTree } = useRtdbValue(uid ? 'exit_questions' : null, {
     enabled: Boolean(uid),
-    filter: (t) => t.createdBy === uid,
-    sort: (a, b) =>
-      String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')),
+    resyncKey: dataEpoch,
   });
-  const { value: questionsTree, loading: questionsLoading } = useRtdbValue(
-    uid ? 'exit_questions' : null,
-    {
-      enabled: Boolean(uid),
-    }
-  );
 
   const [tickets, setTickets] = useState<ExitTicket[]>([]);
   const [loading, setLoading] = useState(true);
@@ -94,7 +120,12 @@ export default function ExitTicketLibraryScreen() {
   const [search, setSearch] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<ExitTicket | null>(null);
   const [busy, setBusy] = useState(false);
+  const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [launchedCode, setLaunchedCode] = useState('');
+  const [showCreateSession, setShowCreateSession] = useState(false);
+  const [sessionName, setSessionName] = useState('');
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [createdSessionCode, setCreatedSessionCode] = useState('');
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const listRef = useRef<FlatList<ExitTicket>>(null);
@@ -103,19 +134,16 @@ export default function ExitTicketLibraryScreen() {
   const pendingTicketEnds = useRef(new Set<string>());
   const questionDetailRequested = useRef(new Set<string>());
 
-  useEffect(() => {
-    if (!uid) {
-      setTickets([]);
-      setLoading(false);
-      return;
-    }
-    if (liveLoading || questionsLoading) return;
-    if (liveTickets.length > 0) {
+  const applyTicketRows = useCallback(
+    (rows: ExitTicket[]) => {
+      const sorted = rows.slice().sort((a, b) =>
+        String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || ''))
+      );
       pendingTicketDeletes.current.forEach((id) => {
-        if (!liveTickets.some((t) => t.id === id)) pendingTicketDeletes.current.delete(id);
+        if (!sorted.some((t) => t.id === id)) pendingTicketDeletes.current.delete(id);
       });
       pendingTicketEnds.current.forEach((id) => {
-        const live = liveTickets.find((t) => t.id === id);
+        const live = sorted.find((t) => t.id === id);
         const status = live ? displayTicketStatus(live.status) : '';
         if (!live || status === 'ended' || status === 'paused') {
           pendingTicketEnds.current.delete(id);
@@ -124,38 +152,28 @@ export default function ExitTicketLibraryScreen() {
       setTickets((prev) => {
         const prevById = Object.fromEntries(prev.map((t) => [t.id, t]));
         return attachQuestionsToTickets(
-          liveTickets.filter((t) => !pendingTicketDeletes.current.has(t.id)),
+          sorted.filter((t) => !pendingTicketDeletes.current.has(t.id)),
           questionsTree,
           prevById
         ).map((t) => (pendingTicketEnds.current.has(t.id) ? { ...t, status: 'ended' } : t));
       });
       setLoading(false);
-      return;
+    },
+    [questionsTree]
+  );
+
+  useEffect(() => {
+    if (!uid) {
+      setTickets([]);
+      setLoading(false);
+      return undefined;
     }
-    listExitTickets()
-      .then((rows) => {
-        pendingTicketDeletes.current.forEach((id) => {
-          if (!rows.some((t) => t.id === id)) pendingTicketDeletes.current.delete(id);
-        });
-        pendingTicketEnds.current.forEach((id) => {
-          const live = rows.find((t) => t.id === id);
-          const status = live ? displayTicketStatus(live.status) : '';
-          if (!live || status === 'ended' || status === 'paused') {
-            pendingTicketEnds.current.delete(id);
-          }
-        });
-        setTickets((prev) => {
-          const prevById = Object.fromEntries(prev.map((t) => [t.id, t]));
-          return attachQuestionsToTickets(
-            rows.filter((t) => !pendingTicketDeletes.current.has(t.id)),
-            questionsTree,
-            prevById
-          ).map((t) => (pendingTicketEnds.current.has(t.id) ? { ...t, status: 'ended' } : t));
-        });
-      })
-      .catch(() => setTickets([]))
-      .finally(() => setLoading(false));
-  }, [uid, liveTickets, liveLoading, questionsTree, questionsLoading]);
+    if (liveTicketsLoading && (liveTickets as ExitTicket[]).length === 0) {
+      return undefined;
+    }
+    applyTicketRows(liveTickets as ExitTicket[]);
+    return undefined;
+  }, [uid, liveTickets, liveTicketsLoading, liveTicketsError, applyTicketRows]);
 
   // Web ExitTicketDashboard: GET /exit-tickets/:id when exit_questions has no row yet.
   useEffect(() => {
@@ -191,16 +209,16 @@ export default function ExitTicketLibraryScreen() {
   }, [tickets]);
 
   const stats = useMemo(() => {
-    const drafts = tickets.filter((t) => displayTicketStatus(t.status) === 'draft').length;
-    const active = tickets.filter((t) => displayTicketStatus(t.status) === 'active').length;
+    const drafts = tickets.filter((t) => ticketListStatus(t, sessions, activeSession) === 'draft').length;
+    const active = tickets.filter((t) => ticketListStatus(t, sessions, activeSession) === 'active').length;
     const ended = tickets.filter((t) => {
-      const s = displayTicketStatus(t.status);
+      const s = ticketListStatus(t, sessions, activeSession);
       return s === 'ended' || s === 'paused';
     }).length;
     return { drafts, active, ended };
-  }, [tickets]);
+  }, [tickets, sessions, activeSession]);
 
-  const activeTicket = tickets.find((t) => displayTicketStatus(t.status) === 'active');
+  const activeTicket = tickets.find((t) => ticketListStatus(t, sessions, activeSession) === 'active');
 
   const filtered = useMemo(() => {
     let rows = tickets;
@@ -209,10 +227,10 @@ export default function ExitTicketLibraryScreen() {
       rows = rows.filter((t) => String(t.title || '').toLowerCase().includes(term));
     }
     if (filter !== 'all') {
-      rows = rows.filter((t) => displayTicketStatus(t.status) === filter);
+      rows = rows.filter((t) => ticketListStatus(t, sessions, activeSession) === filter);
     }
-    return sortTicketsForDisplay(rows);
-  }, [tickets, search, filter]);
+    return sortTicketsForDisplay(rows, sessions, activeSession);
+  }, [tickets, search, filter, sessions, activeSession]);
 
   useEffect(() => {
     const id = activeTicket?.id || null;
@@ -242,8 +260,13 @@ export default function ExitTicketLibraryScreen() {
     return false;
   };
 
+  const ticketLaunchBlocked = liveActivityBlocksLaunch(liveActivity);
+
   const onLaunch = async (ticket: ExitTicket) => {
     if (!requireSession()) return;
+    if (blockMobileLaunchIfBusy(liveActivity, { type: 'exitticket', id: ticket.id })) return;
+    if (launchingId) return;
+    setLaunchingId(ticket.id);
     try {
       const launched = await startExitTicket(ticket.id);
       setTickets((prev) =>
@@ -252,6 +275,8 @@ export default function ExitTicketLibraryScreen() {
       setLaunchedCode(launched.joinCode || '');
     } catch (error) {
       showLaunchFailureAlert(activeSession?.currentActivity, error);
+    } finally {
+      setLaunchingId(null);
     }
   };
 
@@ -309,20 +334,51 @@ export default function ExitTicketLibraryScreen() {
     }
   };
 
+  const onCreateSession = useCallback(async () => {
+    if (!sessionName.trim()) {
+      showAlert({
+        type: 'warning',
+        title: 'Session name required',
+        message: 'Enter a session name.',
+        primary: { label: 'Close' },
+      });
+      return;
+    }
+    setCreatingSession(true);
+    try {
+      const session = await createSession(sessionName.trim());
+      setShowCreateSession(false);
+      setSessionName('');
+      setCreatedSessionCode(session.sessionCode);
+    } catch (error) {
+      showAlert({
+        type: 'error',
+        title: 'Could not create session',
+        message: cleanErrorMessage(error, 'Failed to create session'),
+        primary: { label: 'Close' },
+      });
+    } finally {
+      setCreatingSession(false);
+    }
+  }, [createSession, sessionName]);
+
   const listHeader = (
     <View style={styles.listHeader}>
-      <View style={styles.sessionBanner} accessibilityRole="text">
-        <Ionicons
-          name={activeSession ? 'checkmark-circle' : 'alert-circle-outline'}
-          size={16}
-          color="#4A1F3D"
+      {activeSession ? (
+        <View style={styles.sessionBanner} accessibilityRole="text">
+          <Ionicons name="checkmark-circle" size={16} color="#4A1F3D" />
+          <Text style={styles.sessionBannerText}>
+            {'Launching to session: '}
+            <Text style={styles.sessionBannerCode}>{sessionCode}</Text>
+            {` · ${activityStatus}`}
+          </Text>
+        </View>
+      ) : (
+        <HostNoSessionBanner
+          style={styles.sessionIdleBanner}
+          onCreateSession={() => setShowCreateSession(true)}
         />
-        <Text style={styles.sessionBannerText}>
-          {activeSession
-            ? `Launching to session: ${sessionCode} · ${activityStatus}`
-            : 'No active session — create one on Explore to launch tickets.'}
-        </Text>
-      </View>
+      )}
 
       <View style={styles.hero}>
         <View style={styles.heroTitleRow}>
@@ -428,7 +484,7 @@ export default function ExitTicketLibraryScreen() {
             />
           }
           renderItem={({ item }) => {
-            const status = displayTicketStatus(item.status);
+            const status = ticketListStatus(item, sessions, activeSession);
             const qCount = ticketQuestionCount(item);
             const responses = Number(item.responsesCount || 0);
             const joinCode = status === 'active' ? item.joinCode : '';
@@ -501,8 +557,13 @@ export default function ExitTicketLibraryScreen() {
                         label="Launch"
                         icon="play-outline"
                         primary
+                        disabled={ticketLaunchBlocked || launchingId === item.id}
                         onPress={() => onLaunch(item)}
-                        accessibilityLabel="Launch exit ticket"
+                        accessibilityLabel={
+                          ticketLaunchBlocked
+                            ? 'Launch exit ticket, another activity is live'
+                            : 'Launch exit ticket'
+                        }
                       />
                       <CardButton
                         label="Delete"
@@ -531,6 +592,9 @@ export default function ExitTicketLibraryScreen() {
                         accessibilityLabel="View responses"
                       />
                     </>
+                  ) : null}
+                  {status === 'draft' && ticketLaunchBlocked ? (
+                    <Text style={styles.sessionHint}>{ANOTHER_ACTIVITY_LIVE_HINT}</Text>
                   ) : null}
                   {status === 'ended' ? (
                     <>
@@ -598,6 +662,26 @@ export default function ExitTicketLibraryScreen() {
         onConfirm={onConfirmDelete}
       />
 
+      <CreateSessionModal
+        visible={showCreateSession}
+        title="Create Session"
+        value={sessionName}
+        onChangeText={setSessionName}
+        onCancel={() => {
+          setShowCreateSession(false);
+          setSessionName('');
+        }}
+        onSubmit={onCreateSession}
+        submitting={creatingSession}
+      />
+
+      <ActivityCreatedModal
+        visible={Boolean(createdSessionCode)}
+        title="Session Created!"
+        code={createdSessionCode}
+        onClose={() => setCreatedSessionCode('')}
+      />
+
       <ActivityCreatedModal
         visible={Boolean(launchedCode)}
         title="Exit Ticket Created"
@@ -615,6 +699,7 @@ function CardButton({
   primary,
   danger,
   solidEnd,
+  disabled,
   accessibilityLabel,
 }: {
   label: string;
@@ -623,18 +708,22 @@ function CardButton({
   primary?: boolean;
   danger?: boolean;
   solidEnd?: boolean;
+  disabled?: boolean;
   accessibilityLabel: string;
 }) {
   const iconColor = solidEnd || primary ? COLORS.white : danger ? '#B3261E' : '#2B1F27';
   return (
     <Pressable
       onPress={onPress}
+      disabled={disabled}
       style={({ pressed }) => [
         styles.cardBtn,
         primary && styles.cardBtnPrimary,
         danger && styles.cardBtnDanger,
         solidEnd && styles.cardBtnSolidEnd,
+        disabled && styles.cardBtnDisabled,
         pressed &&
+          !disabled &&
           (solidEnd
             ? styles.cardBtnSolidEndPressed
             : danger
@@ -642,7 +731,8 @@ function CardButton({
               : styles.cardBtnPressed),
       ]}
       accessibilityRole="button"
-      accessibilityLabel={accessibilityLabel}>
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ disabled: Boolean(disabled) }}>
       <Ionicons name={icon} size={solidEnd ? 14 : 16} color={iconColor} />
       <Text
         style={[
@@ -671,11 +761,19 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 12,
   },
+  sessionIdleBanner: {
+    marginHorizontal: 16,
+    marginTop: 12,
+  },
   sessionBannerText: {
     flex: 1,
     fontSize: 12,
     color: '#4A1F3D',
     lineHeight: 16,
+  },
+  sessionBannerCode: {
+    fontWeight: FONT_WEIGHTS.bold,
+    color: COLORS.primary,
   },
   hero: {
     marginHorizontal: 16,
@@ -860,6 +958,15 @@ const styles = StyleSheet.create({
   cardBtnPrimary: {
     backgroundColor: '#6B3A5C',
     borderColor: '#6B3A5C',
+  },
+  cardBtnDisabled: {
+    opacity: 0.55,
+  },
+  sessionHint: {
+    width: '100%',
+    fontSize: 12,
+    color: '#6B7280',
+    textAlign: 'center',
   },
   cardBtnDanger: {
     borderColor: '#F5B5B0',

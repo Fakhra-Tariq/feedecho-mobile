@@ -1,8 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { router, type Href } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { router, useFocusEffect, useNavigation, type Href } from 'expo-router';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
+  BackHandler,
+  Pressable,
   StyleSheet,
   Text,
   TextInput,
@@ -13,14 +15,18 @@ import {
 import { ActivityCreatedModal } from '@/components/ActivityCreatedModal';
 import { showAlert, showToast } from '@/components/feedback';
 import { cleanErrorMessage } from '@/lib/activeActivity';
+import { liveActivityBlocksLaunch } from '@/lib/liveHostActivity';
 import { AiQuizGeneratorModal } from '@/components/AiQuizGeneratorModal';
+import { CreateSessionModal } from '@/components/CreateSessionModal';
 import {
   KEYBOARD_BOTTOM_GAP,
   KeyboardSafeScreen,
 } from '@/components/KeyboardSafeScreen';
 import { LaunchQuizSettingsModal } from '@/components/LaunchQuizSettingsModal';
+import { QuizEditorHeaderActions } from '@/components/QuizEditorHeaderActions';
 import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING } from '@/constants/theme';
 import { useHostSessions } from '@/context/HostSessionContext';
+import { useQuizEditorDirty } from '@/hooks/useQuizEditorDirty';
 import {
   AI_GENERATED_QUIZ_SOURCE,
   getQuizEditorTypeParam,
@@ -28,11 +34,25 @@ import {
   type QuizTypeLabel,
 } from '@/lib/aiGeneratedQuiz';
 import { createQuiz, updateQuiz } from '@/lib/hostQuizzes';
+import { openHostQuizLaunch } from '@/lib/openHostQuizLaunch';
+import {
+  serializeQuizEditorSnapshot,
+  type QuizEditorHeaderMode,
+} from '@/lib/quizEditorSnapshot';
 
 type Props = {
   quizType: QuizTypeLabel;
   initialQuiz?: any | null;
+  /** Other quiz types keep the AI Generator. Mixed Type creation/edit pass false. */
+  showAiGenerator?: boolean;
 };
+
+const HOST_LIBRARY_HREF = '/host/library' as Href;
+
+function initialEditorQuestions(initialQuiz: any, quizType: QuizTypeLabel) {
+  if (!initialQuiz?.questions?.length) return [];
+  return normalizeQuestionsForEditor(initialQuiz.questions, quizType);
+}
 
 function blankMcq() {
   return {
@@ -71,21 +91,122 @@ function blankMixed(type: 'multiple-choice' | 'true-false' | 'short-answer') {
   return { id: Date.now(), type, questionText: '', sampleAnswer: '' };
 }
 
-export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
-  const { activeSession } = useHostSessions();
+export function QuizEditorScreen({
+  quizType,
+  initialQuiz = null,
+  showAiGenerator = true,
+}: Props) {
+  const { activeSession, createSession, liveActivity } = useHostSessions();
+  const navigation = useNavigation();
+  const leaveToLibraryRef = useRef(false);
+  const modeRef = useRef<QuizEditorHeaderMode>('create');
+  const isSavedEdit = Boolean(initialQuiz?.id && !initialQuiz?.isFromPaste);
   const [title, setTitle] = useState(initialQuiz?.title || '');
-  const [questions, setQuestions] = useState<any[]>(
-    initialQuiz?.questions?.length
-      ? normalizeQuestionsForEditor(initialQuiz.questions, quizType)
-      : []
+  const [questions, setQuestions] = useState<any[]>(() =>
+    initialEditorQuestions(initialQuiz, quizType)
   );
   const [source, setSource] = useState(initialQuiz?.source || '');
   const [quizId, setQuizId] = useState<string | null>(initialQuiz?.id ? String(initialQuiz.id) : null);
-  const [saved, setSaved] = useState(Boolean(initialQuiz?.id && !initialQuiz?.isFromPaste));
   const [saving, setSaving] = useState(false);
   const [showAi, setShowAi] = useState(false);
   const [showLaunch, setShowLaunch] = useState(false);
-  const [launchedCode, setLaunchedCode] = useState('');
+  const [showCreateSession, setShowCreateSession] = useState(false);
+  const [sessionName, setSessionName] = useState('');
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [createdSessionCode, setCreatedSessionCode] = useState('');
+  const [snapshot, setSnapshot] = useState<string | null>(() =>
+    isSavedEdit
+      ? serializeQuizEditorSnapshot({
+          title: initialQuiz.title,
+          questions: initialEditorQuestions(initialQuiz, quizType),
+          quizType,
+        })
+      : null
+  );
+  const persistedId = snapshot ? quizId : null;
+  const { mode } = useQuizEditorDirty({
+    title,
+    questions,
+    quizType,
+    persistedId,
+    snapshot,
+  });
+  modeRef.current = mode;
+
+  const goToLibraryReplace = useCallback(() => {
+    // Allow any in-flight beforeRemove to proceed (must be set BEFORE navigate).
+    // Do not no-op on a second tap: earlier attempts set this flag then used a
+    // navigation action the quiz stack cannot handle, which trapped the host.
+    leaveToLibraryRef.current = true;
+    const openLibrary = () => {
+      // Library is a sibling tab, not a quiz-stack screen. dismissAll() is
+      // POP_TO_TOP on the focused quiz stack (drops create/edit). navigate()
+      // then selects `/host/library` (same href as the Library tab).
+      if (typeof router.canDismiss === 'function' && router.canDismiss()) {
+        router.dismissAll();
+      }
+      router.navigate(HOST_LIBRARY_HREF);
+    };
+    // Finish the current beforeRemove tick first; navigating in the same call
+    // after preventDefault is ignored by Expo Router 58 removal prevention.
+    queueMicrotask(openLibrary);
+  }, []);
+
+  const onEditorBack = useCallback(() => {
+    // Shared by header arrow, "Back to Library", hardware back, and gestures.
+    // Dirty (saved then edited, not re-saved): existing one-screen back.
+    // Otherwise (just saved, or no unsaved edits): Library tab.
+    if (modeRef.current === 'dirty') {
+      if (navigation.canGoBack()) {
+        navigation.goBack();
+        return;
+      }
+      router.back();
+      return;
+    }
+    goToLibraryReplace();
+  }, [goToLibraryReplace, navigation]);
+
+  useEffect(() => {
+    const stopRemove = navigation.addListener('beforeRemove', (e: { preventDefault: () => void; data?: { action?: { type?: string } } }) => {
+      if (leaveToLibraryRef.current) return;
+      if (modeRef.current === 'dirty') return;
+      const type = e.data?.action?.type;
+      if (type && type !== 'GO_BACK' && type !== 'POP') return;
+      e.preventDefault();
+      onEditorBack();
+    });
+    return () => {
+      stopRemove();
+    };
+  }, [navigation, onEditorBack]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const hardware = BackHandler.addEventListener('hardwareBackPress', () => {
+        if (modeRef.current === 'dirty') return false;
+        onEditorBack();
+        return true;
+      });
+      return () => hardware.remove();
+    }, [onEditorBack])
+  );
+
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      gestureEnabled: true,
+      headerLeft: () => (
+        <Pressable
+          onPress={onEditorBack}
+          accessibilityRole="button"
+          accessibilityLabel="Back"
+          hitSlop={8}
+          style={{ paddingHorizontal: 12, paddingVertical: 8 }}>
+          <Ionicons name="arrow-back" size={24} color={COLORS.header} />
+        </Pressable>
+      ),
+    });
+  }, [navigation, onEditorBack]);
 
   useEffect(() => {
     if (initialQuiz) return;
@@ -96,14 +217,21 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
         if (parsed?.type && getQuizEditorTypeParam(parsed.type) !== getQuizEditorTypeParam(quizType)) {
           return;
         }
+        const loadedQuestions = normalizeQuestionsForEditor(parsed.questions || [], quizType);
         setTitle(parsed.title || '');
-        setQuestions(normalizeQuestionsForEditor(parsed.questions || [], quizType));
+        setQuestions(loadedQuestions);
         setSource(parsed.source || '');
         // Temp client ids (Date.now) must create; only Firebase push keys update.
         const id = parsed.id != null ? String(parsed.id) : '';
         if (id && !parsed.isFromPaste && !/^\d+$/.test(id)) {
           setQuizId(id);
-          setSaved(true);
+          setSnapshot(
+            serializeQuizEditorSnapshot({
+              title: parsed.title || '',
+              questions: loadedQuestions,
+              quizType,
+            })
+          );
         }
         AsyncStorage.removeItem('editingQuiz');
       } catch {
@@ -114,6 +242,7 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
 
   const heading = useMemo(() => `Create ${quizType} Quiz`, [quizType]);
   const isMixedType = quizType === 'Mixed Type';
+  const allowAiGenerator = showAiGenerator && !isMixedType;
 
   const emptyHelper = useMemo(() => {
     if (quizType === 'Multiple Choice') {
@@ -129,7 +258,6 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
   }, [quizType]);
 
   const addQuestion = (mixedType?: 'multiple-choice' | 'true-false' | 'short-answer') => {
-    setSaved(false);
     if (quizType === 'Multiple Choice') {
       setQuestions((prev) => [...prev, blankMcq()]);
       return;
@@ -146,12 +274,10 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
   };
 
   const updateQuestion = (index: number, patch: Record<string, unknown>) => {
-    setSaved(false);
     setQuestions((prev) => prev.map((q, i) => (i === index ? { ...q, ...patch } : q)));
   };
 
   const removeQuestion = (index: number) => {
-    setSaved(false);
     setQuestions((prev) => prev.filter((_, i) => i !== index));
   };
 
@@ -207,8 +333,6 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
     return true;
   };
 
-  const showLaunchButton = !validationError && saved && Boolean(quizId);
-
   const save = async () => {
     if (saving || !validate()) return;
     setSaving(true);
@@ -230,7 +354,7 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
         : await createQuiz(payload);
       if (!savedQuiz?.id) throw new Error('Failed to save quiz');
       setQuizId(String(savedQuiz.id));
-      setSaved(true);
+      setSnapshot(serializeQuizEditorSnapshot({ title, questions, quizType }));
       showToast({
         type: 'success',
         title: wasUpdate ? 'Quiz updated' : 'Quiz saved',
@@ -247,27 +371,49 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
     }
   };
 
+  const launchBusy = liveActivityBlocksLaunch(liveActivity, { type: 'quiz', id: quizId });
+
   const openLaunch = () => {
-    if (!saved || !quizId) {
-      showAlert({
-        type: 'warning',
-        title: 'Save first',
-        message: 'Save the quiz before launching.',
-        primary: { label: 'Close' },
-      });
-      return;
-    }
-    if (!activeSession?.sessionCode) {
-      showAlert({
-        type: 'warning',
-        title: 'No active session',
-        message: 'Only one session can be active at a time. Create a session on Explore first.',
-        primary: { label: 'Close' },
-      });
+    if (showLaunch || saving) return;
+    const result = openHostQuizLaunch({
+      activeSession,
+      liveActivity,
+      quiz: { id: quizId },
+    });
+    if (!result.ok) {
+      if (result.reason === 'no-session') setShowCreateSession(true);
       return;
     }
     setShowLaunch(true);
   };
+
+  const onCreateSession = useCallback(async () => {
+    if (!sessionName.trim()) {
+      showAlert({
+        type: 'warning',
+        title: 'Session name required',
+        message: 'Enter a session name.',
+        primary: { label: 'Close' },
+      });
+      return;
+    }
+    setCreatingSession(true);
+    try {
+      const session = await createSession(sessionName.trim());
+      setShowCreateSession(false);
+      setSessionName('');
+      setCreatedSessionCode(session.sessionCode);
+    } catch (error) {
+      showAlert({
+        type: 'error',
+        title: 'Could not create session',
+        message: cleanErrorMessage(error, 'Failed to create session'),
+        primary: { label: 'Close' },
+      });
+    } finally {
+      setCreatingSession(false);
+    }
+  }, [createSession, sessionName]);
 
   return (
     <>
@@ -275,102 +421,24 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
       style={styles.screen}
       contentContainerStyle={[styles.content, { paddingBottom: SPACING[16] + KEYBOARD_BOTTOM_GAP }]}>
         <Text style={styles.heading}>{heading}</Text>
-        {isMixedType ? (
-          <>
-            <Text style={styles.subtitle}>
-              Add your quiz title and start creating questions with different types
-            </Text>
-            <View style={styles.actions}>
-              <TouchableOpacity
-                style={styles.mixedAiBtn}
-                onPress={() => setShowAi(true)}
-                accessibilityRole="button"
-                accessibilityLabel="AI Generator">
-                <Ionicons name="sparkles-outline" size={18} color={COLORS.primary} />
-                <Text style={styles.mixedAiBtnLabel}>AI Generator</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.saveBtn,
-                  saved && !saving && styles.saveBtnSaved,
-                  saving && styles.saveBtnDisabled,
-                ]}
-                onPress={save}
-                disabled={saving}
-                accessibilityRole="button"
-                accessibilityLabel="Save Quiz">
-                <Ionicons
-                  name={saved && !saving ? 'checkmark' : 'save-outline'}
-                  size={18}
-                  color={saved && !saving ? COLORS.primary : COLORS.white}
-                />
-                <Text style={[styles.saveBtnLabel, saved && !saving && styles.saveBtnSavedLabel]}>
-                  {saving ? 'Saving…' : saved ? 'Saved' : 'Save Quiz'}
-                </Text>
-              </TouchableOpacity>
-              {showLaunchButton ? (
-                <View style={styles.launchWrap}>
-                  <TouchableOpacity
-                    style={styles.launchBtn}
-                    onPress={openLaunch}
-                    accessibilityRole="button"
-                    accessibilityLabel="Launch Quiz">
-                    <Ionicons name="rocket-outline" size={18} color={COLORS.white} />
-                    <Text style={styles.saveBtnLabel}>Launch Quiz</Text>
-                  </TouchableOpacity>
-                  <Text style={styles.launchHint}>Requires an active session</Text>
-                </View>
-              ) : null}
-            </View>
-          </>
-        ) : (
-          <>
-            <Text style={styles.subtitle}>Add your quiz title and start creating questions</Text>
-            <View style={styles.actions}>
-              <TouchableOpacity
-                style={[
-                  styles.saveBtn,
-                  saved && !saving && styles.saveBtnSaved,
-                  saving && styles.saveBtnDisabled,
-                ]}
-                onPress={save}
-                disabled={saving}
-                accessibilityRole="button"
-                accessibilityLabel="Save Quiz">
-                <Ionicons
-                  name={saved && !saving ? 'checkmark' : 'save-outline'}
-                  size={18}
-                  color={saved && !saving ? COLORS.primary : COLORS.white}
-                />
-                <Text style={[styles.saveBtnLabel, saved && !saving && styles.saveBtnSavedLabel]}>
-                  {saving ? 'Saving…' : saved ? 'Saved' : 'Save Quiz'}
-                </Text>
-              </TouchableOpacity>
-              {showLaunchButton ? (
-                <View style={styles.launchWrap}>
-                  <TouchableOpacity
-                    style={styles.launchBtn}
-                    onPress={openLaunch}
-                    accessibilityRole="button"
-                    accessibilityLabel="Launch Quiz">
-                    <Ionicons name="rocket-outline" size={18} color={COLORS.white} />
-                    <Text style={styles.saveBtnLabel}>Launch Quiz</Text>
-                  </TouchableOpacity>
-                  <Text style={styles.launchHint}>Requires an active session</Text>
-                </View>
-              ) : null}
-            </View>
-          </>
-        )}
+        <Text style={styles.subtitle}>
+          {isMixedType
+            ? 'Add your quiz title and start creating questions with different types'
+            : 'Add your quiz title and start creating questions'}
+        </Text>
+        <QuizEditorHeaderActions
+          mode={mode}
+          saving={saving}
+          launchBusy={launchBusy}
+          onSave={save}
+          onLaunch={openLaunch}
+        />
 
         <View style={styles.titleCard}>
           <Text style={styles.label}>Quiz Title</Text>
           <TextInput
             value={title}
-            onChangeText={(value) => {
-              setSaved(false);
-              setTitle(value);
-            }}
+            onChangeText={setTitle}
             placeholder="Enter your quiz title..."
             placeholderTextColor={COLORS.darkTextSecondary}
             style={styles.titleInput}
@@ -493,13 +561,15 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
               <Ionicons name="add" size={18} color={COLORS.white} />
               <Text style={styles.addFirstLabel}>+ Add First Question</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.aiBtn}
-              onPress={() => setShowAi(true)}
-              accessibilityRole="button"
-              accessibilityLabel="AI Generator">
-              <Text style={styles.aiBtnLabel}>AI Generator</Text>
-            </TouchableOpacity>
+            {allowAiGenerator ? (
+              <TouchableOpacity
+                style={styles.aiBtn}
+                onPress={() => setShowAi(true)}
+                accessibilityRole="button"
+                accessibilityLabel="AI Generator">
+                <Text style={styles.aiBtnLabel}>AI Generator</Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         ) : quizType === 'Mixed Type' ? (
           <View style={styles.addRow}>
@@ -533,7 +603,7 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
           </View>
         )}
 
-        <TouchableOpacity onPress={() => router.push('/host/library' as Href)}>
+        <TouchableOpacity onPress={onEditorBack} accessibilityRole="button">
           <Text style={styles.back}>Back to Library</Text>
         </TouchableOpacity>
     </KeyboardSafeScreen>
@@ -545,7 +615,6 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
           setTitle(quiz.title || '');
           setQuestions(normalizeQuestionsForEditor(quiz.questions || [], quizType));
           setSource(quiz.source || AI_GENERATED_QUIZ_SOURCE);
-          setSaved(false);
         }}
       />
 
@@ -561,18 +630,28 @@ export function QuizEditorScreen({ quizType, initialQuiz = null }: Props) {
         onClose={() => setShowLaunch(false)}
         onLaunched={() => {
           setShowLaunch(false);
-          setLaunchedCode(activeSession?.sessionCode || '');
+          goToLibraryReplace();
         }}
       />
 
-      <ActivityCreatedModal
-        visible={Boolean(launchedCode)}
-        title="Quiz Created"
-        code={launchedCode}
-        onClose={() => {
-          setLaunchedCode('');
-          router.push('/host/library' as Href);
+      <CreateSessionModal
+        visible={showCreateSession}
+        title="Create Session"
+        value={sessionName}
+        onChangeText={setSessionName}
+        onCancel={() => {
+          setShowCreateSession(false);
+          setSessionName('');
         }}
+        onSubmit={onCreateSession}
+        submitting={creatingSession}
+      />
+
+      <ActivityCreatedModal
+        visible={Boolean(createdSessionCode)}
+        title="Session Created!"
+        code={createdSessionCode}
+        onClose={() => setCreatedSessionCode('')}
       />
     </>
   );
@@ -587,57 +666,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
     marginTop: -SPACING[1],
-  },
-  actions: { gap: SPACING[2] },
-  mixedAiBtn: {
-    width: '100%',
-    minHeight: 48,
-    borderRadius: RADIUS.full,
-    backgroundColor: COLORS.white,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: SPACING[2],
-    paddingHorizontal: SPACING[4],
-  },
-  mixedAiBtnLabel: { color: COLORS.primary, fontWeight: FONT_WEIGHTS.semibold, fontSize: 15 },
-  saveBtn: {
-    width: '100%',
-    minHeight: 48,
-    borderRadius: RADIUS.full,
-    backgroundColor: COLORS.primary,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: SPACING[2],
-    paddingHorizontal: SPACING[4],
-  },
-  saveBtnDisabled: { opacity: 0.7 },
-  saveBtnSaved: {
-    backgroundColor: COLORS.blush,
-    borderWidth: 1,
-    borderColor: COLORS.mutedPurple,
-  },
-  saveBtnLabel: { color: COLORS.white, fontWeight: FONT_WEIGHTS.bold, fontSize: 15 },
-  saveBtnSavedLabel: { color: COLORS.primary },
-  launchWrap: { width: '100%', gap: 4 },
-  launchBtn: {
-    width: '100%',
-    minHeight: 48,
-    borderRadius: RADIUS.full,
-    backgroundColor: COLORS.primary,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: SPACING[2],
-    paddingHorizontal: SPACING[4],
-  },
-  launchHint: {
-    color: COLORS.inkSecondary,
-    fontSize: 12,
-    textAlign: 'center',
   },
   titleCard: {
     backgroundColor: COLORS.white,

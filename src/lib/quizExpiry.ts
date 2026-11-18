@@ -32,6 +32,18 @@ export function isQuizExpired(quiz: QuizExpiryInput | null | undefined, now = Da
   return getQuizTimeRemaining(quiz || {}, now) === 0;
 }
 
+/**
+ * Same live-quiz rule as server `hasAnyActiveActivity`:
+ * `launched === true` and `status` is `launched` or `active`, and not past endTime.
+ */
+export function isQuizLiveLikeLaunchGuard(quiz: QuizExpiryInput | null | undefined, now = Date.now()) {
+  if (!quiz) return false;
+  const status = String(quiz.status || '').toLowerCase();
+  if (!isLaunchedFlag(quiz) || (status !== 'launched' && status !== 'active')) return false;
+  if (isQuizExpired(quiz, now)) return false;
+  return true;
+}
+
 export function isQuizCurrentlyActive(quiz: QuizExpiryInput | null | undefined, now = Date.now()) {
   if (!quiz) return false;
   const status = String(quiz.status || '').toLowerCase();

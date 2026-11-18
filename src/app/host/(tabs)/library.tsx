@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
-import { router, useFocusEffect, type Href } from 'expo-router';
+import { router, type Href } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -17,24 +17,28 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ActivityCreatedModal } from '@/components/ActivityCreatedModal';
 import { showAlert, showToast } from '@/components/feedback';
 import { cleanErrorMessage } from '@/lib/activeActivity';
+import { ANOTHER_ACTIVITY_LIVE_HINT, liveActivityBlocksLaunch } from '@/lib/liveHostActivity';
 import { ConfirmModal } from '@/components/ConfirmModal';
 import { CreateSessionModal } from '@/components/CreateSessionModal';
+import { HostNoSessionBanner } from '@/components/HostNoSessionBanner';
 import { KEYBOARD_SCROLL_PROPS, KeyboardSafeScreen } from '@/components/KeyboardSafeScreen';
 import { LaunchQuizSettingsModal } from '@/components/LaunchQuizSettingsModal';
 import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING } from '@/constants/theme';
-import { useAuth } from '@/context/AuthContext';
 import { useHostSessions, useSessionActivityLabel } from '@/context/HostSessionContext';
 import { normalizeQuizTypeLabel } from '@/lib/aiGeneratedQuiz';
 import {
   deleteQuiz,
   finishQuiz,
-  listTeacherQuizzes,
-  mergeTeacherQuizLists,
   quizBucket,
-  subscribeTeacherQuizzes,
   type HostQuiz,
 } from '@/lib/hostQuizzes';
+import {
+  isClaimedCurrentActivity,
+  isLinkedSessionInactive,
+  type SessionMatchInput,
+} from '@/lib/sessionActivityMatch';
 import { formatSessionDate } from '@/lib/formatLocalDateTime';
+import { openHostQuizLaunch } from '@/lib/openHostQuizLaunch';
 import { autoFinishExpiredQuiz } from '@/lib/quizAutoFinish';
 import { getQuizTimeRemaining, isQuizExpired } from '@/lib/quizExpiry';
 import { TAB_BAR_CONTENT_HEIGHT } from '@/lib/tabBarSafeArea';
@@ -81,8 +85,25 @@ function formatQuizTime(seconds: number) {
   return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
-function statusBadgeLabel(quiz: HostQuiz) {
+function quizListBucket(
+  quiz: HostQuiz,
+  sessions: Array<{ id?: string; sessionCode?: string; status?: string }>,
+  session?: SessionMatchInput | null
+) {
+  if (isClaimedCurrentActivity('quiz', quiz.id, session)) return 'launched';
   const bucket = quizBucket(quiz);
+  if (bucket === 'launched' && isLinkedSessionInactive(quiz as Record<string, unknown>, sessions)) {
+    return 'finished';
+  }
+  return bucket;
+}
+
+function statusBadgeLabel(
+  quiz: HostQuiz,
+  sessions: Array<{ id?: string; sessionCode?: string; status?: string }>,
+  session?: SessionMatchInput | null
+) {
+  const bucket = quizListBucket(quiz, sessions, session);
   if (bucket === 'finished') return 'Finished';
   if (bucket === 'launched') return 'Launched';
   return 'Ready';
@@ -90,10 +111,15 @@ function statusBadgeLabel(quiz: HostQuiz) {
 
 export default function QuizLibraryScreen() {
   const insets = useSafeAreaInsets();
-  const { profile, user } = useAuth();
-  const { activeSession, createSession } = useHostSessions();
+  const {
+    activeSession,
+    createSession,
+    liveActivity,
+    sessions,
+    quizzes: hostQuizzes,
+    quizzesLoading: hostQuizzesLoading,
+  } = useHostSessions();
   const activityLabel = useSessionActivityLabel();
-  const teacherId = String(user?.uid || profile?.uid || '').trim();
 
   const [quizzes, setQuizzes] = useState<HostQuiz[]>([]);
   const [loading, setLoading] = useState(true);
@@ -108,109 +134,57 @@ export default function QuizLibraryScreen() {
   const [creatingSession, setCreatingSession] = useState(false);
   const [createdSessionCode, setCreatedSessionCode] = useState('');
   const [nowTick, setNowTick] = useState(0);
+  const [finishTarget, setFinishTarget] = useState<HostQuiz | null>(null);
+  const [finishing, setFinishing] = useState(false);
   const pendingQuizDeletes = useRef(new Set<string>());
   const pendingQuizFinishes = useRef(new Set<string>());
   const pendingQuizLaunches = useRef(new Map<string, HostQuiz>());
+  const finishingLock = useRef(false);
+  const hasQuizRowsRef = useRef(false);
 
   const isActive = Boolean(activeSession);
   const sessionCode = String(activeSession?.sessionCode || '')
     .trim()
     .toUpperCase();
 
+  const applyQuizOverlays = useCallback((rows: HostQuiz[]) => {
+    pendingQuizDeletes.current.forEach((id) => {
+      if (!rows.some((q) => q.id === id)) pendingQuizDeletes.current.delete(id);
+    });
+    pendingQuizFinishes.current.forEach((id) => {
+      const row = rows.find((q) => q.id === id);
+      if (!row || quizBucket(row) !== 'launched') pendingQuizFinishes.current.delete(id);
+    });
+    pendingQuizLaunches.current.forEach((_pending, id) => {
+      const row = rows.find((q) => q.id === id);
+      if (row && quizBucket(row) === 'launched') pendingQuizLaunches.current.delete(id);
+    });
+    return rows
+      .filter((q) => !pendingQuizDeletes.current.has(q.id))
+      .map((q) => {
+        if (pendingQuizFinishes.current.has(q.id)) {
+          return { ...q, status: 'ready' as const, launched: false };
+        }
+        const launchedOverlay = pendingQuizLaunches.current.get(q.id);
+        if (launchedOverlay && quizBucket(q) !== 'launched') {
+          return {
+            ...q,
+            ...launchedOverlay,
+            id: q.id,
+            launched: true,
+            status: launchedOverlay.status || 'launched',
+          };
+        }
+        return q;
+      });
+  }, []);
+
   useEffect(() => {
-    if (!teacherId) {
-      setQuizzes([]);
-      setLoading(false);
-      return undefined;
-    }
-
-    setLoading(true);
-    let cancelled = false;
-    let sawRtdbRows = false;
-
-    const applyRows = (rows: HostQuiz[]) => {
-      if (cancelled) return;
-      pendingQuizDeletes.current.forEach((id) => {
-        if (!rows.some((q) => q.id === id)) pendingQuizDeletes.current.delete(id);
-      });
-      pendingQuizFinishes.current.forEach((id) => {
-        const row = rows.find((q) => q.id === id);
-        if (!row || quizBucket(row) !== 'launched') pendingQuizFinishes.current.delete(id);
-      });
-      pendingQuizLaunches.current.forEach((_pending, id) => {
-        const row = rows.find((q) => q.id === id);
-        if (row && quizBucket(row) === 'launched') pendingQuizLaunches.current.delete(id);
-      });
-      const mapped = rows
-        .filter((q) => !pendingQuizDeletes.current.has(q.id))
-        .map((q) => {
-          if (pendingQuizFinishes.current.has(q.id)) {
-            return { ...q, status: 'ready', launched: false };
-          }
-          const launchedOverlay = pendingQuizLaunches.current.get(q.id);
-          if (launchedOverlay && quizBucket(q) !== 'launched') {
-            return {
-              ...q,
-              ...launchedOverlay,
-              id: q.id,
-              launched: true,
-              status: launchedOverlay.status || 'launched',
-            };
-          }
-          return q;
-        });
-      // Merge into the current list. Never replace a non-empty library with [].
-      setQuizzes((prev) => {
-        const incoming = mapped.length === 0 ? prev : mergeTeacherQuizLists(mapped, prev);
-        return incoming.map((q) => {
-          const old = prev.find((p) => p.id === q.id);
-          if (old && quizBucket(old) === 'launched' && quizBucket(q) === 'finished') {
-            const oldTs = Date.parse(String(old.updatedAt || '')) || 0;
-            const newTs = Date.parse(String(q.updatedAt || '')) || 0;
-            if (newTs <= oldTs) return old;
-          }
-          return q;
-        });
-      });
-      setLoading(false);
-    };
-
-    const loadApiList = () => {
-      listTeacherQuizzes(teacherId)
-        .then((rows) => {
-          if (cancelled) return;
-          applyRows(rows);
-        })
-        .catch(() => {
-          if (!cancelled && !sawRtdbRows) applyRows([]);
-        });
-    };
-
-    const unsubscribe = subscribeTeacherQuizzes(
-      teacherId,
-      (rows) => {
-        if (rows.length > 0) sawRtdbRows = true;
-        listTeacherQuizzes(teacherId)
-          .then((apiRows) => {
-            if (cancelled) return;
-            applyRows(mergeTeacherQuizLists(apiRows, rows));
-          })
-          .catch(() => {
-            if (!cancelled) applyRows(rows);
-          });
-      },
-      () => loadApiList()
-    );
-
-    // Web Quiz Library always GET /quizzes (`syncQuizzes`). Do the same on
-    // mount so a stale RTDB Finished row cannot hide a live launch.
-    loadApiList();
-
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, [teacherId]);
+    const next = applyQuizOverlays(hostQuizzes);
+    hasQuizRowsRef.current = next.length > 0;
+    setQuizzes(next);
+    if (!hostQuizzesLoading || next.length > 0) setLoading(false);
+  }, [hostQuizzes, hostQuizzesLoading, applyQuizOverlays]);
 
   // Tick for live countdown on launched quizzes (Web QuizTimer).
   useEffect(() => {
@@ -222,16 +196,18 @@ export default function QuizLibraryScreen() {
 
   const stats = useMemo(() => {
     const total = quizzes.length;
-    const ready = quizzes.filter((q) => quizBucket(q) === 'ready').length;
-    const active = quizzes.filter((q) => quizBucket(q) === 'launched').length;
-    const finished = quizzes.filter((q) => quizBucket(q) === 'finished').length;
+    const ready = quizzes.filter((q) => quizListBucket(q, sessions, activeSession) === 'ready').length;
+    const active = quizzes.filter((q) => quizListBucket(q, sessions, activeSession) === 'launched').length;
+    const finished = quizzes.filter((q) => quizListBucket(q, sessions, activeSession) === 'finished').length;
     return { total, ready, active, finished };
-  }, [quizzes, nowTick]);
+  }, [quizzes, nowTick, sessions, activeSession]);
 
   const hasActiveQuiz = useMemo(
-    () => quizzes.some((q) => quizBucket(q) === 'launched'),
-    [quizzes, nowTick]
+    () => quizzes.some((q) => quizListBucket(q, sessions, activeSession) === 'launched'),
+    [quizzes, nowTick, sessions, activeSession]
   );
+
+  const launchBlocked = liveActivityBlocksLaunch(liveActivity);
 
 
   const filtered = useMemo(() => {
@@ -242,76 +218,33 @@ export default function QuizLibraryScreen() {
     }
     switch (filter) {
       case 'ready':
-        return rows.filter((q) => quizBucket(q) === 'ready');
+        return rows.filter((q) => quizListBucket(q, sessions, activeSession) === 'ready');
       case 'launched':
-        return rows.filter((q) => quizBucket(q) === 'launched');
+        return rows.filter((q) => quizListBucket(q, sessions, activeSession) === 'launched');
       case 'finished':
-        return rows.filter((q) => quizBucket(q) === 'finished');
+        return rows.filter((q) => quizListBucket(q, sessions, activeSession) === 'finished');
       default:
         return rows;
     }
-  }, [quizzes, search, filter, nowTick]);
+  }, [quizzes, search, filter, nowTick, sessions, activeSession]);
 
   const onEdit = (quiz: HostQuiz) => {
     router.push(`/host/quiz/edit/${quiz.id}` as Href);
   };
 
   const onLaunch = (quiz: HostQuiz) => {
-    if (!activeSession?.sessionCode) {
-      setShowCreateSession(true);
+    const result = openHostQuizLaunch({ activeSession, liveActivity, quiz });
+    if (!result.ok) {
+      if (result.reason === 'no-session') setShowCreateSession(true);
       return;
     }
     setLaunchQuizItem(quiz);
   };
 
-  const refreshQuizzesFromApi = useCallback(() => {
-    if (!teacherId) return;
-    listTeacherQuizzes(teacherId)
-      .then((rows) => {
-        pendingQuizDeletes.current.forEach((id) => {
-          if (!rows.some((q) => q.id === id)) pendingQuizDeletes.current.delete(id);
-        });
-        pendingQuizFinishes.current.forEach((id) => {
-          const row = rows.find((q) => q.id === id);
-          if (!row || quizBucket(row) !== 'launched') pendingQuizFinishes.current.delete(id);
-        });
-        pendingQuizLaunches.current.forEach((_, id) => {
-          const row = rows.find((q) => q.id === id);
-          if (row && quizBucket(row) === 'launched') pendingQuizLaunches.current.delete(id);
-        });
-        setQuizzes(
-          rows
-            .filter((q) => !pendingQuizDeletes.current.has(q.id))
-            .map((q) => {
-              if (pendingQuizFinishes.current.has(q.id)) {
-                return { ...q, status: 'ready', launched: false };
-              }
-              const launchedOverlay = pendingQuizLaunches.current.get(q.id);
-              if (launchedOverlay && quizBucket(q) !== 'launched') {
-                return {
-                  ...q,
-                  ...launchedOverlay,
-                  id: q.id,
-                  launched: true,
-                  status: launchedOverlay.status || 'launched',
-                };
-              }
-              return q;
-            })
-        );
-      })
-      .catch(() => {
-        // Keep the live list; launch/finish already updated local state.
-      });
-  }, [teacherId]);
-
-  useFocusEffect(
-    useCallback(() => {
-      refreshQuizzesFromApi();
-    }, [refreshQuizzesFromApi])
-  );
-
   const onFinish = useCallback(async (quiz: HostQuiz) => {
+    if (finishingLock.current) return;
+    finishingLock.current = true;
+    setFinishing(true);
     try {
       await finishQuiz(quiz.id);
       pendingQuizLaunches.current.delete(quiz.id);
@@ -319,8 +252,8 @@ export default function QuizLibraryScreen() {
       setQuizzes((prev) =>
         prev.map((q) => (q.id === quiz.id ? { ...q, status: 'ready', launched: false } : q))
       );
+      setFinishTarget(null);
       showToast({ type: 'success', title: 'Quiz finished' });
-      refreshQuizzesFromApi();
     } catch (error) {
       showAlert({
         type: 'error',
@@ -328,8 +261,11 @@ export default function QuizLibraryScreen() {
         message: cleanErrorMessage(error, 'Try again'),
         primary: { label: 'Close' },
       });
+    } finally {
+      finishingLock.current = false;
+      setFinishing(false);
     }
-  }, [refreshQuizzesFromApi]);
+  }, []);
 
   useEffect(() => {
     quizzes.forEach((quiz) => {
@@ -342,10 +278,9 @@ export default function QuizLibraryScreen() {
           prev.map((q) => (q.id === quiz.id ? { ...q, status: 'ready', launched: false } : q))
         );
         showToast({ type: 'success', title: 'Quiz finished' });
-        refreshQuizzesFromApi();
       });
     });
-  }, [quizzes, nowTick, refreshQuizzesFromApi]);
+  }, [quizzes, nowTick]);
 
   const onConfirmDelete = async () => {
     if (!deleteTarget) return;
@@ -419,33 +354,19 @@ export default function QuizLibraryScreen() {
   const renderHeader = () => (
     <View style={styles.topBlock}>
       {/* SessionLaunchBanner — same conditions as Web */}
-      <View style={styles.banner} accessibilityRole="text">
-        {isActive ? (
-          <>
-            <Ionicons name="checkmark-circle" size={16} color={COLORS.primary} />
-            <Text style={styles.bannerText}>
-              Launching to session:{' '}
-              <Text style={styles.bannerCode}>{sessionCode || '—'}</Text>
-              {' · '}
-              {activityLabel}
-            </Text>
-          </>
-        ) : (
-          <>
-            <Ionicons name="warning-outline" size={16} color={COLORS.primary} />
-            <Text style={styles.bannerText}>
-              {"You'll need an active session to launch this. "}
-              <Text
-                style={styles.bannerLink}
-                onPress={() => setShowCreateSession(true)}
-                accessibilityRole="button"
-                accessibilityLabel="Create Session">
-                Create Session
-              </Text>
-            </Text>
-          </>
-        )}
-      </View>
+      {isActive ? (
+        <View style={styles.banner} accessibilityRole="text">
+          <Ionicons name="checkmark-circle" size={16} color={COLORS.primary} />
+          <Text style={styles.bannerText}>
+            Launching to session:{' '}
+            <Text style={styles.bannerCode}>{sessionCode || '—'}</Text>
+            {' · '}
+            {activityLabel}
+          </Text>
+        </View>
+      ) : (
+        <HostNoSessionBanner onCreateSession={() => setShowCreateSession(true)} />
+      )}
 
       {/* Mobile hero — solid primary (same token as Launch Quiz / All chip) */}
       <View style={styles.hero}>
@@ -507,15 +428,19 @@ export default function QuizLibraryScreen() {
         />
       </View>
 
-      {hasActiveQuiz && filtered.length > 0 ? (
+      {launchBlocked && filtered.length > 0 ? (
         <View style={styles.activeNotice}>
           <View style={styles.activeNoticeIcon}>
             <Ionicons name="warning-outline" size={16} color={HERO_PLUM} />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={styles.activeNoticeTitle}>Only one quiz can be active at a time</Text>
+            <Text style={styles.activeNoticeTitle}>
+              {hasActiveQuiz ? 'Only one quiz can be active at a time' : ANOTHER_ACTIVITY_LIVE_HINT}
+            </Text>
             <Text style={styles.activeNoticeBody}>
-              Finish the current active quiz before launching another one
+              {hasActiveQuiz
+                ? 'Finish the current active quiz before launching another one'
+                : 'Finish the current activity before launching another one'}
             </Text>
           </View>
         </View>
@@ -524,8 +449,8 @@ export default function QuizLibraryScreen() {
   );
 
   const renderCard = ({ item }: { item: HostQuiz }) => {
-    const bucket = quizBucket(item);
-    const badge = statusBadgeLabel(item);
+    const bucket = quizListBucket(item, sessions, activeSession);
+    const badge = statusBadgeLabel(item, sessions, activeSession);
     // Web always uses "{n} questions" (no singular form).
     const qCount = item.questionCount ?? item.questions?.length ?? 0;
     const typeLabel = normalizeQuizTypeLabel(item.type);
@@ -621,43 +546,49 @@ export default function QuizLibraryScreen() {
         <View style={styles.actionsCol}>
           {bucket === 'launched' ? (
             <Pressable
-              onPress={() => onFinish(item)}
-              disabled={timerExpired}
+              onPress={() => {
+                if (finishingLock.current || finishing) return;
+                setFinishTarget(item);
+              }}
+              disabled={timerExpired || finishing}
               style={({ pressed }) => [
                 styles.launchBtn,
-                timerExpired && styles.launchBtnDisabled,
-                pressed && !timerExpired && styles.launchBtnPressed,
+                (timerExpired || finishing) && styles.launchBtnDisabled,
+                pressed && !timerExpired && !finishing && styles.launchBtnPressed,
               ]}
               accessibilityRole="button"
               accessibilityLabel={timerExpired ? 'Quiz Expired' : 'Finish Quiz'}
-              accessibilityState={{ disabled: timerExpired }}>
-              <Ionicons name="flag-outline" size={18} color={COLORS.white} />
+              accessibilityState={{ disabled: timerExpired || finishing }}>
+              {finishing && finishTarget?.id === item.id ? (
+                <ActivityIndicator color={COLORS.white} />
+              ) : (
+                <Ionicons name="flag-outline" size={18} color={COLORS.white} />
+              )}
               <Text style={styles.launchBtnLabel}>
-                {timerExpired ? 'Quiz Expired' : 'Finish Quiz'}
+                {timerExpired ? 'Quiz Expired' : finishing && finishTarget?.id === item.id ? 'Finishing…' : 'Finish Quiz'}
               </Text>
-            </Pressable>
-          ) : hasActiveQuiz ? (
-            <Pressable
-              disabled
-              style={[styles.launchBtn, styles.launchBtnDisabled]}
-              accessibilityRole="button"
-              accessibilityLabel="Quiz Active - Cannot Launch"
-              accessibilityState={{ disabled: true }}>
-              <Ionicons name="rocket-outline" size={18} color={COLORS.white} />
-              <Text style={styles.launchBtnLabel}>Quiz Active - Cannot Launch</Text>
             </Pressable>
           ) : (
             <View style={styles.launchBlock}>
               <Pressable
                 onPress={() => onLaunch(item)}
-                style={({ pressed }) => [styles.launchBtn, pressed && styles.launchBtnPressed]}
+                disabled={launchBlocked}
+                style={({ pressed }) => [
+                  styles.launchBtn,
+                  launchBlocked && styles.launchBtnDisabled,
+                  pressed && !launchBlocked && styles.launchBtnPressed,
+                ]}
                 accessibilityRole="button"
-                accessibilityLabel="Launch Quiz">
+                accessibilityLabel={
+                  launchBlocked ? 'Launch Quiz, another activity is live' : 'Launch Quiz'
+                }
+                accessibilityState={{ disabled: launchBlocked }}>
                 <Ionicons name="rocket-outline" size={18} color={COLORS.white} />
                 <Text style={styles.launchBtnLabel}>Launch Quiz</Text>
               </Pressable>
-              {/* Web LaunchRequiresSessionHint — always under Launch; button stays enabled */}
-              <Text style={styles.sessionHint}>Requires an active session</Text>
+              <Text style={styles.sessionHint}>
+                {launchBlocked ? ANOTHER_ACTIVITY_LIVE_HINT : 'Requires an active session'}
+              </Text>
             </View>
           )}
 
@@ -685,14 +616,18 @@ export default function QuizLibraryScreen() {
           </View>
         </View>
 
-        {hasActiveQuiz && bucket !== 'launched' ? (
+        {launchBlocked && bucket !== 'launched' ? (
           <View style={styles.lockedBlock}>
             <View style={styles.lockedRow}>
               <Ionicons name="lock-closed-outline" size={18} color={COLORS.muted} />
-              <Text style={styles.lockedTitle}>Waiting for the active quiz to finish</Text>
+              <Text style={styles.lockedTitle}>
+                {hasActiveQuiz
+                  ? 'Waiting for the active quiz to finish'
+                  : ANOTHER_ACTIVITY_LIVE_HINT}
+              </Text>
             </View>
             <Text style={styles.lockedBody}>
-              You can launch this quiz once the current one is completed
+              You can launch this quiz once the current activity is completed
             </Text>
           </View>
         ) : null}
@@ -712,7 +647,7 @@ export default function QuizLibraryScreen() {
           data={filtered}
           keyExtractor={(item) => item.id}
           {...KEYBOARD_SCROLL_PROPS}
-          extraData={{ quizzes, activityLabel, hasActiveQuiz, filter, nowTick }}
+          extraData={{ quizzes, activityLabel, hasActiveQuiz, launchBlocked, filter, nowTick, finishing }}
           ListHeaderComponent={renderHeader}
           contentContainerStyle={[styles.list, { paddingBottom: listPadBottom }]}
           ListEmptyComponent={
@@ -773,7 +708,6 @@ export default function QuizLibraryScreen() {
               ''
           );
           setLaunchQuizItem(null);
-          refreshQuizzesFromApi();
         }}
       />
 
@@ -782,6 +716,21 @@ export default function QuizLibraryScreen() {
         title="Quiz Launched"
         code={launchedCode}
         onClose={() => setLaunchedCode('')}
+      />
+
+      <ConfirmModal
+        visible={Boolean(finishTarget)}
+        title="End this quiz?"
+        message="The audience will no longer be able to attempt it."
+        confirmLabel="Finish"
+        busy={finishing}
+        onCancel={() => {
+          if (finishing) return;
+          setFinishTarget(null);
+        }}
+        onConfirm={() => {
+          if (finishTarget) void onFinish(finishTarget);
+        }}
       />
 
       <ConfirmModal

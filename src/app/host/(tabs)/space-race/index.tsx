@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { router, type Href } from 'expo-router';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   AppState,
@@ -16,6 +16,8 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ActivityCreatedModal } from '@/components/ActivityCreatedModal';
+import { CreateSessionModal } from '@/components/CreateSessionModal';
+import { HostNoSessionBanner } from '@/components/HostNoSessionBanner';
 import { showAlert, showToast } from '@/components/feedback';
 import { ConfirmModal } from '@/components/ConfirmModal';
 import { KEYBOARD_SCROLL_PROPS, KeyboardSafeScreen } from '@/components/KeyboardSafeScreen';
@@ -27,24 +29,29 @@ import { COLORS, FONT_WEIGHTS, RADIUS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { useHostSessions, useSessionActivityLabel } from '@/context/HostSessionContext';
 import {
+  blockMobileLaunchIfBusy,
   cleanErrorMessage,
   isActivityConflictMessage,
   showActivityBlockedAlert,
   showLaunchFailureAlert,
 } from '@/lib/activeActivity';
+import { ANOTHER_ACTIVITY_LIVE_HINT, liveActivityBlocksLaunch } from '@/lib/liveHostActivity';
 import {
   deleteSpaceRace,
   endSpaceRace,
   getRaceParticipants,
-  listSpaceRaces,
   updateSpaceRace,
   updateSpaceRaceStatus,
   type SpaceRace,
 } from '@/lib/hostSpaceRaces';
+import {
+  isClaimedCurrentActivity,
+  isLinkedSessionInactive,
+  type SessionMatchInput,
+} from '@/lib/sessionActivityMatch';
 import { buildTeamStandings, getRaceStatus } from '@/lib/spaceRaceTeams';
 import { TAB_BAR_CONTENT_HEIGHT } from '@/lib/tabBarSafeArea';
 import { toParticipantCount } from '@/lib/toParticipantCount';
-import { useRtdbList } from '@/lib/useRtdb';
 
 const FILTERS = [
   { id: 'all', label: 'All' },
@@ -54,6 +61,20 @@ const FILTERS = [
 ] as const;
 
 const RACES_PAGE_SIZE = 5;
+
+function raceListStatus(
+  race: SpaceRace,
+  sessions: Array<{ id?: string; sessionCode?: string; status?: string }>,
+  session?: SessionMatchInput | null
+) {
+  const id = String(race.id || race.raceId || '');
+  if (isClaimedCurrentActivity('spacerace', id, session)) return 'active';
+  const status = getRaceStatus(race);
+  if (status === 'active' && isLinkedSessionInactive(race as Record<string, unknown>, sessions)) {
+    return 'completed';
+  }
+  return status;
+}
 
 const HOW_IT_WORKS = [
   'Pick an existing quiz from your library to turn into a race',
@@ -125,19 +146,20 @@ function RaceTimer({ race }: { race: SpaceRace }) {
 }
 
 export default function HostSpaceRaceLibraryScreen() {
-  const { profile } = useAuth();
-  const { activeSession } = useHostSessions();
+  const { profile, user } = useAuth();
+  const {
+    activeSession,
+    createSession,
+    liveActivity,
+    sessions,
+    liveRaces,
+    liveRacesLoading,
+    liveRacesError,
+  } = useHostSessions();
   const activityLabel = useSessionActivityLabel();
   const insets = useSafeAreaInsets();
-  const uid = profile?.uid || '';
+  const uid = String(user?.uid || profile?.uid || '').trim();
   const isSessionActive = Boolean(activeSession?.sessionCode);
-
-  const { list: liveRaces, loading: liveLoading } = useRtdbList(uid ? 'spaceRaces' : null, {
-    enabled: Boolean(uid),
-    filter: (r) => String(r.createdBy || '') === uid,
-    sort: (a, b) =>
-      String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')),
-  });
 
   const [races, setRaces] = useState<SpaceRace[]>([]);
   const [loading, setLoading] = useState(true);
@@ -152,6 +174,11 @@ export default function HostSpaceRaceLibraryScreen() {
     {}
   );
   const [launchedCode, setLaunchedCode] = useState('');
+  const [showCreateSession, setShowCreateSession] = useState(false);
+  const [sessionName, setSessionName] = useState('');
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [createdSessionCode, setCreatedSessionCode] = useState('');
+  const [startingRaceId, setStartingRaceId] = useState<string | null>(null);
   const [howItWorksOpen, setHowItWorksOpen] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const pendingRaceDeletes = useRef(new Set<string>());
@@ -163,61 +190,35 @@ export default function HostSpaceRaceLibraryScreen() {
       setLoading(false);
       return;
     }
-    if (liveLoading) return;
-    if (liveRaces.length > 0) {
-      pendingRaceDeletes.current.forEach((id) => {
-        if (!liveRaces.some((r) => String(r.id || r.raceId) === id)) {
-          pendingRaceDeletes.current.delete(id);
-        }
-      });
-      pendingRaceEnds.current.forEach((id) => {
-        const live = liveRaces.find((r) => String(r.id || r.raceId) === id);
-        if (!live || getRaceStatus(live as SpaceRace) === 'completed') {
-          pendingRaceEnds.current.delete(id);
-        }
-      });
-      setRaces(
-        liveRaces
-          .filter((r) => !pendingRaceDeletes.current.has(String(r.id || r.raceId)))
-          .map((r) => {
-            const id = String(r.id || r.raceId);
-            if (pendingRaceEnds.current.has(id)) {
-              return { ...r, status: 'completed' };
-            }
-            return r;
-          }) as SpaceRace[]
-      );
-      setLoading(false);
-      return;
-    }
-    listSpaceRaces()
-      .then((rows) => {
-        const owned = (rows || []).filter(
-          (r) => !uid || String(r.createdBy || '') === uid
-        ) as SpaceRace[];
-        pendingRaceDeletes.current.forEach((id) => {
-          if (!owned.some((r) => String(r.id || r.raceId) === id)) {
-            pendingRaceDeletes.current.delete(id);
+    if (liveRacesLoading) return;
+    pendingRaceDeletes.current.forEach((id) => {
+      if (!liveRaces.some((r) => String(r.id || r.raceId) === id)) {
+        pendingRaceDeletes.current.delete(id);
+      }
+    });
+    pendingRaceEnds.current.forEach((id) => {
+      const live = liveRaces.find((r) => String(r.id || r.raceId) === id);
+      if (!live || getRaceStatus(live as SpaceRace) === 'completed') {
+        pendingRaceEnds.current.delete(id);
+      }
+    });
+    setRaces(
+      (liveRaces as SpaceRace[])
+        .slice()
+        .sort((a, b) =>
+          String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || ''))
+        )
+        .filter((r) => !pendingRaceDeletes.current.has(String(r.id || r.raceId)))
+        .map((r) => {
+          const id = String(r.id || r.raceId);
+          if (pendingRaceEnds.current.has(id)) {
+            return { ...r, status: 'completed' };
           }
-        });
-        pendingRaceEnds.current.forEach((id) => {
-          const live = owned.find((r) => String(r.id || r.raceId) === id);
-          if (!live || getRaceStatus(live) === 'completed') {
-            pendingRaceEnds.current.delete(id);
-          }
-        });
-        setRaces(
-          owned
-            .filter((r) => !pendingRaceDeletes.current.has(String(r.id || r.raceId)))
-            .map((r) => {
-              const id = String(r.id || r.raceId);
-              return pendingRaceEnds.current.has(id) ? { ...r, status: 'completed' } : r;
-            })
-        );
-      })
-      .catch(() => setRaces([]))
-      .finally(() => setLoading(false));
-  }, [uid, liveRaces, liveLoading]);
+          return r;
+        })
+    );
+    setLoading(false);
+  }, [uid, liveRaces, liveRacesLoading, liveRacesError]);
 
   useEffect(() => {
     const nonDraft = races.filter((r) => getRaceStatus(r) !== 'draft');
@@ -239,13 +240,14 @@ export default function HostSpaceRaceLibraryScreen() {
   }, [races]);
 
   const stats = useMemo(() => {
-    const draft = races.filter((r) => getRaceStatus(r) === 'draft').length;
-    const active = races.filter((r) => getRaceStatus(r) === 'active').length;
-    const completed = races.filter((r) => getRaceStatus(r) === 'completed').length;
+    const draft = races.filter((r) => raceListStatus(r, sessions, activeSession) === 'draft').length;
+    const active = races.filter((r) => raceListStatus(r, sessions, activeSession) === 'active').length;
+    const completed = races.filter((r) => raceListStatus(r, sessions, activeSession) === 'completed').length;
     return { draft, active, completed };
-  }, [races]);
+  }, [races, sessions, activeSession]);
 
-  const activeRace = races.find((r) => getRaceStatus(r) === 'active');
+  const activeRace = races.find((r) => raceListStatus(r, sessions, activeSession) === 'active');
+  const raceLaunchBlocked = liveActivityBlocksLaunch(liveActivity);
 
   const filtered = useMemo(() => {
     let rows = races;
@@ -254,8 +256,8 @@ export default function HostSpaceRaceLibraryScreen() {
       rows = rows.filter((r) => String(r.title || '').toLowerCase().includes(term));
     }
     if (filter === 'all') return rows;
-    return rows.filter((r) => getRaceStatus(r) === filter);
-  }, [races, search, filter]);
+    return rows.filter((r) => raceListStatus(r, sessions, activeSession) === filter);
+  }, [races, search, filter, sessions, activeSession]);
 
   useEffect(() => {
     setVisibleRaceCount(RACES_PAGE_SIZE);
@@ -272,7 +274,7 @@ export default function HostSpaceRaceLibraryScreen() {
 
   const onStartDraft = async (race: SpaceRace) => {
     const id = race.id || race.raceId;
-    if (!id) return;
+    if (!id || startingRaceId) return;
     if (!activeSession?.sessionCode) {
       showAlert({
         type: 'warning',
@@ -282,10 +284,12 @@ export default function HostSpaceRaceLibraryScreen() {
       });
       return;
     }
+    if (blockMobileLaunchIfBusy(liveActivity, { type: 'spacerace', id })) return;
     if (activeRace && (activeRace.id || activeRace.raceId) !== id) {
       showActivityBlockedAlert(activeSession?.currentActivity);
       return;
     }
+    setStartingRaceId(id);
     try {
       const updated = await updateSpaceRaceStatus(id, 'active');
       setRaces((prev) =>
@@ -305,6 +309,8 @@ export default function HostSpaceRaceLibraryScreen() {
           primary: { label: 'Close' },
         });
       }
+    } finally {
+      setStartingRaceId(null);
     }
   };
 
@@ -384,31 +390,52 @@ export default function HostSpaceRaceLibraryScreen() {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
+  const onCreateSession = useCallback(async () => {
+    if (!sessionName.trim()) {
+      showAlert({
+        type: 'warning',
+        title: 'Session name required',
+        message: 'Enter a session name.',
+        primary: { label: 'Close' },
+      });
+      return;
+    }
+    setCreatingSession(true);
+    try {
+      const session = await createSession(sessionName.trim());
+      setShowCreateSession(false);
+      setSessionName('');
+      setCreatedSessionCode(session.sessionCode);
+    } catch (error) {
+      showAlert({
+        type: 'error',
+        title: 'Could not create session',
+        message: cleanErrorMessage(error, 'Failed to create session'),
+        primary: { label: 'Close' },
+      });
+    } finally {
+      setCreatingSession(false);
+    }
+  }, [createSession, sessionName]);
+
   const listPadBottom = TAB_BAR_CONTENT_HEIGHT + insets.bottom + SPACING[4];
 
   const listHeader = (
     <View style={styles.listHeader}>
       <View style={styles.topBlock}>
-        <View style={styles.banner} accessibilityRole="text">
-          {isSessionActive ? (
-            <>
-              <Ionicons name="checkmark-circle" size={16} color={COLORS.primary} />
-              <Text style={styles.bannerText}>
-                Launching to session:{' '}
-                <Text style={styles.bannerCode}>{activeSession?.sessionCode || '—'}</Text>
-                {' · '}
-                {activityLabel}
-              </Text>
-            </>
-          ) : (
-            <>
-              <Ionicons name="warning-outline" size={16} color={COLORS.primary} />
-              <Text style={styles.bannerText}>
-                {"You'll need an active session to launch a Space Race."}
-              </Text>
-            </>
-          )}
-        </View>
+        {isSessionActive ? (
+          <View style={styles.banner} accessibilityRole="text">
+            <Ionicons name="checkmark-circle" size={16} color={COLORS.primary} />
+            <Text style={styles.bannerText}>
+              Launching to session:{' '}
+              <Text style={styles.bannerCode}>{activeSession?.sessionCode || '—'}</Text>
+              {' · '}
+              {activityLabel}
+            </Text>
+          </View>
+        ) : (
+          <HostNoSessionBanner onCreateSession={() => setShowCreateSession(true)} />
+        )}
 
         <View style={styles.hero}>
           <View style={styles.heroBrownWash} pointerEvents="none" />
@@ -509,7 +536,7 @@ export default function HostSpaceRaceLibraryScreen() {
           }
           renderItem={({ item }) => {
             const id = String(item.id || item.raceId);
-            const status = getRaceStatus(item);
+            const status = raceListStatus(item, sessions, activeSession);
             const badgeLabel =
               status === 'active' ? 'ACTIVE' : status === 'completed' ? 'COMPLETED' : 'DRAFT';
             const participants = toParticipantCount(item.participantsCount, item.participants);
@@ -615,9 +642,15 @@ export default function HostSpaceRaceLibraryScreen() {
                           label="Launch"
                           icon="play-outline"
                           primary
+                          disabled={
+                            raceLaunchBlocked || startingRaceId === id || Boolean(startingRaceId)
+                          }
                           onPress={() => onStartDraft(item)}
                         />
                       </View>
+                      {raceLaunchBlocked ? (
+                        <Text style={styles.sessionHint}>{ANOTHER_ACTIVITY_LIVE_HINT}</Text>
+                      ) : null}
                       <Action
                         label="Delete"
                         icon="trash-outline"
@@ -699,6 +732,26 @@ export default function HostSpaceRaceLibraryScreen() {
         }}
       />
 
+      <CreateSessionModal
+        visible={showCreateSession}
+        title="Create Session"
+        value={sessionName}
+        onChangeText={setSessionName}
+        onCancel={() => {
+          setShowCreateSession(false);
+          setSessionName('');
+        }}
+        onSubmit={onCreateSession}
+        submitting={creatingSession}
+      />
+
+      <ActivityCreatedModal
+        visible={Boolean(createdSessionCode)}
+        title="Session Created!"
+        code={createdSessionCode}
+        onClose={() => setCreatedSessionCode('')}
+      />
+
       <ActivityCreatedModal
         visible={Boolean(launchedCode)}
         title="Space Race Created"
@@ -749,6 +802,7 @@ function Action({
   danger,
   primary,
   fullWidth,
+  disabled,
 }: {
   label: string;
   icon: keyof typeof Ionicons.glyphMap;
@@ -756,6 +810,7 @@ function Action({
   danger?: boolean;
   primary?: boolean;
   fullWidth?: boolean;
+  disabled?: boolean;
 }) {
   const iconColor = primary ? COLORS.white : danger ? '#B3261E' : '#2B1F27';
   return (
@@ -765,12 +820,16 @@ function Action({
         primary && styles.actionPrimary,
         danger && styles.actionDanger,
         fullWidth && styles.actionFullWidth,
+        disabled && styles.actionDisabled,
         pressed &&
+          !disabled &&
           (danger ? styles.actionDangerPressed : styles.actionPressed),
       ]}
       onPress={onPress}
+      disabled={disabled}
       accessibilityRole="button"
-      accessibilityLabel={label}>
+      accessibilityLabel={disabled ? `${label}, another activity is live` : label}
+      accessibilityState={{ disabled: Boolean(disabled) }}>
       <Ionicons name={icon} size={16} color={iconColor} />
       <Text
         style={[
@@ -788,7 +847,7 @@ function Action({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: COLORS.background },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  list: { paddingHorizontal: SPACING[4], gap: SPACING[3] },
+  list: { paddingHorizontal: SPACING[4], paddingTop: SPACING[3], gap: SPACING[3] },
   showMore: {
     alignSelf: 'center',
     marginVertical: SPACING[4],
@@ -1035,6 +1094,12 @@ const styles = StyleSheet.create({
   actionDangerLabel: { color: '#B3261E' },
   actionPressed: { backgroundColor: '#F7F2F5' },
   actionDangerPressed: { backgroundColor: '#FBEAE8' },
+  actionDisabled: { opacity: 0.55 },
+  sessionHint: {
+    fontSize: 12,
+    color: '#6B7280',
+    textAlign: 'center',
+  },
   pressed: { opacity: 0.85 },
   modalOverlay: {
     flex: 1,

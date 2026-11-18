@@ -1,5 +1,9 @@
 import { ApiError, apiRequest } from '@/lib/api';
-import { persistJoinedQuizSession } from '@/lib/audienceQuizSession';
+import {
+  findLocalQuizSubmissionForJoin,
+  persistJoinedQuizSession,
+} from '@/lib/audienceQuizSession';
+import { getExitTicketByCode } from '@/lib/hostExitTickets';
 import { joinSessionUnified } from '@/lib/hostSpaceRaces';
 import { normalizeTeamId, saveSpaceRaceParticipant } from '@/lib/spaceRaceSession';
 import { getMyParticipation } from '@/lib/studentParticipation';
@@ -27,6 +31,7 @@ export type JoinSessionResult = {
   needsTeamSelection?: boolean;
   raceData?: any;
   alreadySubmitted?: boolean;
+  alreadyAttemptedOnDevice?: boolean;
 };
 
 function joinErrorMessage(error: unknown, fallback = 'Failed to join session. Please try again.') {
@@ -36,6 +41,120 @@ function joinErrorMessage(error: unknown, fallback = 'Failed to join session. Pl
   }
   if (error instanceof Error && error.message) return error.message;
   return fallback;
+}
+
+function joinErrorMessageForDisplay(error: unknown, studentUid?: string) {
+  return sanitizeJoinFailMessage(joinErrorMessage(error), studentUid);
+}
+
+function sanitizeJoinFailMessage(message: string, studentUid?: string) {
+  if (/already been used on this device/i.test(String(message))) {
+    return studentUid
+      ? 'You have already completed this quiz'
+      : 'Failed to join session. Please try again.';
+  }
+  return message;
+}
+
+function isAlreadyCompletedQuizError(error: unknown, message?: string) {
+  if (error instanceof ApiError) {
+    const data = error.data as { code?: string } | null;
+    if (data?.code === 'ALREADY_ATTEMPTED') return true;
+  }
+  const text = message || joinErrorMessage(error, '');
+  return (
+    /already completed this quiz/i.test(String(text)) ||
+    /already been used on this device/i.test(String(text))
+  );
+}
+
+async function alreadyAttemptedJoinResult(
+  code: string,
+  trimmedName: string
+): Promise<JoinSessionResult> {
+  try {
+    const lookup = await apiRequest<{
+      success?: boolean;
+      type?: string;
+      quizId?: string;
+      raceId?: string;
+      ticketId?: string;
+      joinCode?: string;
+      data?: any;
+    }>(`/sessions/code/${encodeURIComponent(code)}`, { auth: false });
+    const activityType = mapJoinActivityType(lookup?.type);
+    const quizId = String(lookup?.quizId || lookup?.data?.id || '').trim();
+    const raceId = String(lookup?.raceId || (lookup?.type === 'spaceRace' ? lookup?.data?.id : '') || '').trim();
+    const ticketId = String(lookup?.ticketId || (lookup?.type === 'exitTicket' ? lookup?.data?.id : '') || '').trim();
+
+    if (activityType === 'quiz' && quizId) {
+      if (lookup?.data) {
+        try {
+          await persistJoinedQuizSession({
+            studentName: trimmedName,
+            sessionCode: code,
+            quizId,
+            participantId: String(lookup?.data?.participantId || `completed-${quizId}`),
+            quiz: lookup.data,
+          });
+        } catch {
+          // still navigate to the completed screen
+        }
+      }
+      return {
+        success: true,
+        activityType: 'quiz',
+        code,
+        quizId,
+        alreadySubmitted: true,
+        alreadyAttemptedOnDevice: true,
+      };
+    }
+    if (activityType === 'spaceRace' && (raceId || code)) {
+      return {
+        success: true,
+        activityType: 'spaceRace',
+        code,
+        raceId: raceId || undefined,
+        alreadySubmitted: true,
+        alreadyAttemptedOnDevice: true,
+      };
+    }
+    if (activityType === 'exitTicket') {
+      return {
+        success: true,
+        activityType: 'exitTicket',
+        code: String(lookup?.joinCode || code).toUpperCase(),
+        ticketId: ticketId || undefined,
+        alreadySubmitted: true,
+        alreadyAttemptedOnDevice: true,
+      };
+    }
+  } catch {
+    // /sessions/code does not include exit tickets — try the ticket endpoint.
+  }
+
+  try {
+    const ticketRes = await getExitTicketByCode(code);
+    if (ticketRes?.success && ticketRes.data) {
+      return {
+        success: true,
+        activityType: 'exitTicket',
+        code,
+        ticketId: String(ticketRes.data.id || '').trim() || undefined,
+        alreadySubmitted: true,
+        alreadyAttemptedOnDevice: true,
+      };
+    }
+  } catch {
+    // Not an exit ticket (or inactive).
+  }
+
+  return {
+    success: false,
+    error: 'Failed to join session. Please try again.',
+    alreadyAttemptedOnDevice: true,
+  };
 }
 
 /**
@@ -92,6 +211,64 @@ export async function executeSessionJoin(input: {
   const studentEmail = input.studentEmail || undefined;
 
   try {
+    const localCompleted = await findLocalQuizSubmissionForJoin({
+      sessionCode: trimmedCode,
+      studentUid,
+      studentEmail,
+      studentName: trimmedName,
+    });
+    if (localCompleted) {
+      if (studentUid) {
+        const submitted = await alreadySubmittedQuizJoin(
+          trimmedCode,
+          studentUid,
+          studentEmail
+        );
+        if (submitted) return submitted;
+      } else {
+        const quizId = String(localCompleted.quizId || '').trim();
+        try {
+          const lookup = await apiRequest<{
+            success?: boolean;
+            type?: string;
+            quizId?: string;
+            data?: any;
+          }>(`/sessions/code/${encodeURIComponent(trimmedCode)}`, { auth: false });
+          const resolvedId = String(lookup?.quizId || lookup?.data?.id || quizId).trim();
+          const quiz = lookup?.data;
+          if (lookup?.type === 'quiz' && resolvedId && quiz) {
+            await persistJoinedQuizSession({
+              studentName: trimmedName,
+              sessionCode: trimmedCode,
+              quizId: resolvedId,
+              participantId: String(localCompleted.participantId || `completed-${resolvedId}`),
+              quiz,
+            });
+            return {
+              success: true,
+              activityType: 'quiz',
+              code: trimmedCode,
+              quizId: resolvedId,
+              alreadySubmitted: true,
+              alreadyAttemptedOnDevice: true,
+            };
+          }
+        } catch {
+          // still block from the local row
+        }
+        if (quizId) {
+          return {
+            success: true,
+            activityType: 'quiz',
+            code: trimmedCode,
+            quizId,
+            alreadySubmitted: true,
+            alreadyAttemptedOnDevice: true,
+          };
+        }
+      }
+    }
+
     const response = await joinSessionUnified({
       name: trimmedName,
       code: trimmedCode,
@@ -116,21 +293,20 @@ export async function executeSessionJoin(input: {
         response.message ||
         response.error ||
         'Failed to join session. Please try again.';
-      if (
-        input.loggedInStudent &&
-        studentUid &&
-        /already completed this quiz/i.test(failMessage)
-      ) {
-        const submitted = await alreadySubmittedQuizJoin(
-          trimmedCode,
-          studentUid,
-          studentEmail
-        );
-        if (submitted) return submitted;
+      if (isAlreadyCompletedQuizError(null, failMessage)) {
+        if (studentUid) {
+          const submitted = await alreadySubmittedQuizJoin(
+            trimmedCode,
+            studentUid,
+            studentEmail
+          );
+          if (submitted) return submitted;
+        }
+        return alreadyAttemptedJoinResult(trimmedCode, trimmedName);
       }
       return {
         success: false,
-        error: failMessage,
+        error: sanitizeJoinFailMessage(failMessage, studentUid),
       };
     }
 
@@ -225,18 +401,17 @@ export async function executeSessionJoin(input: {
     };
   } catch (error) {
     const failMessage = joinErrorMessage(error);
-    if (
-      input.loggedInStudent &&
-      studentUid &&
-      /already completed this quiz/i.test(failMessage)
-    ) {
-      const submitted = await alreadySubmittedQuizJoin(
-        trimmedCode,
-        studentUid,
-        studentEmail
-      );
-      if (submitted) return submitted;
+    if (isAlreadyCompletedQuizError(error, failMessage)) {
+      if (studentUid) {
+        const submitted = await alreadySubmittedQuizJoin(
+          trimmedCode,
+          studentUid,
+          studentEmail
+        );
+        if (submitted) return submitted;
+      }
+      return alreadyAttemptedJoinResult(trimmedCode, trimmedName);
     }
-    return { success: false, error: failMessage };
+    return { success: false, error: joinErrorMessageForDisplay(error, studentUid) };
   }
 }

@@ -315,13 +315,14 @@ function visibleText(value: unknown) {
   return text;
 }
 
-/** Home Recent Activity title — same fields as Web AudienceHome. */
+/** Home Recent Activity title — exit tickets use resolveExitTicketActivityTitle on the screen. */
 export function activityHomeTitle(
   item: ActivityItem,
   ticketTitles: Record<string, string> = {}
 ) {
   if (item.type === 'exitTicket') {
-    const own = visibleText(item.title);
+    const own =
+      visibleText(item.title) || visibleText((item as { ticketTitle?: unknown }).ticketTitle);
     if (own && own !== 'Exit Ticket') return own;
     const ticketId = String(item.ticketId || '').trim();
     const fetched = ticketId ? visibleText(ticketTitles[ticketId]) : '';

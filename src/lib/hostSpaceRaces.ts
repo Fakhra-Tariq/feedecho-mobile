@@ -1,4 +1,13 @@
+import { get, ref as dbRef } from 'firebase/database';
+
 import { apiRequest } from '@/lib/api';
+import { notifyHostDataMutated } from '@/lib/hostDataSync';
+import { guestDevicePayload } from '@/lib/audienceDeviceId';
+import { db } from '../../firebaseConfig';
+import {
+  isJoinWindowExpired,
+  JoinWindowExpiredError,
+} from '@/lib/spaceRaceJoinWindow';
 
 export type SpaceRace = {
   id?: string;
@@ -93,6 +102,7 @@ export async function createSpaceRace(payload: RaceCreatePayload) {
   if (!response.raceId && !response.data?.id && !response.data?.raceId) {
     throw new Error(response.error || 'Failed to create space race');
   }
+  notifyHostDataMutated();
   return response;
 }
 
@@ -107,6 +117,7 @@ export async function startSpaceRaceCreate(payload: RaceCreatePayload) {
   if (!response.success && !response.raceId && !response.data) {
     throw new Error(response.error || 'Failed to start space race');
   }
+  notifyHostDataMutated();
   return response;
 }
 
@@ -118,6 +129,7 @@ export async function updateSpaceRaceStatus(id: string, status: string) {
   if (!response.success && !response.data) {
     throw new Error(response.error || 'Failed to update race status');
   }
+  notifyHostDataMutated();
   return response.data;
 }
 
@@ -133,6 +145,7 @@ export async function updateSpaceRace(
   if (response.success === false) {
     throw new Error(response.error || 'Failed to update space race');
   }
+  notifyHostDataMutated();
   return response.data;
 }
 
@@ -142,7 +155,10 @@ export async function endSpaceRace(id: string) {
       `/space-races/${id}/end`,
       { method: 'POST' }
     );
-    if (response.success || response.data) return response.data;
+    if (response.success || response.data) {
+      notifyHostDataMutated();
+      return response.data;
+    }
   } catch {
     // fallback below
   }
@@ -154,6 +170,7 @@ export async function deleteSpaceRace(id: string) {
     method: 'DELETE',
   });
   if (response.success === false) throw new Error(response.error || 'Failed to delete race');
+  notifyHostDataMutated();
 }
 
 export async function getRaceParticipants(raceId: string) {
@@ -183,6 +200,7 @@ export async function joinSessionUnified(input: {
   studentUid?: string;
   studentEmail?: string;
 }) {
+  const device = await guestDevicePayload();
   return apiRequest<{
     success?: boolean;
     needsTeamSelection?: boolean;
@@ -206,8 +224,47 @@ export async function joinSessionUnified(input: {
       ...(input.teamId != null ? { teamId: input.teamId } : {}),
       ...(input.studentUid ? { studentUid: input.studentUid } : {}),
       ...(input.studentEmail ? { studentEmail: input.studentEmail } : {}),
+      ...device,
     },
   });
+}
+
+async function readServerNowMs() {
+  try {
+    const snap = await get(dbRef(db, '.info/serverTimeOffset'));
+    return Date.now() + (Number(snap.val()) || 0);
+  } catch {
+    return Date.now();
+  }
+}
+
+async function readLiveRace(raceId: string) {
+  const snap = await get(dbRef(db, `spaceRaces/${raceId}`));
+  return snap.exists() ? snap.val() : null;
+}
+
+async function teamHasStartedQuiz(raceId: string, teamId: number | string | null | undefined) {
+  if (teamId == null || teamId === '') return false;
+  const snap = await get(dbRef(db, `space_race_team_timers/${raceId}/team_${teamId}`));
+  return Boolean(snap.exists() && snap.val()?.quizStartedAt);
+}
+
+/** Reject late writes after join end. Start is allowed if the team already started on time. */
+async function assertJoinWindowAllowsWrite(
+  raceId: string,
+  teamId?: number | string | null,
+  { allowIfTeamStarted = false } = {}
+) {
+  try {
+    const race = await readLiveRace(raceId);
+    if (!race) return;
+    const now = await readServerNowMs();
+    if (!isJoinWindowExpired(race, now)) return;
+    if (allowIfTeamStarted && (await teamHasStartedQuiz(raceId, teamId))) return;
+    throw new JoinWindowExpiredError();
+  } catch (err) {
+    if (err instanceof JoinWindowExpiredError) throw err;
+  }
 }
 
 export async function setTeamSelection(
@@ -223,6 +280,7 @@ export async function setTeamSelection(
     submittedByName?: string;
   }
 ) {
+  await assertJoinWindowAllowsWrite(raceId, data.teamId);
   return apiRequest(`/space-races/${raceId}/team-selection`, {
     method: 'POST',
     auth: false,
@@ -258,6 +316,7 @@ export async function submitRaceAnswer(
     questionIndex?: number;
   }
 ) {
+  await assertJoinWindowAllowsWrite(raceId, answerData.teamId);
   return apiRequest<{ success?: boolean; data?: any; error?: string }>(
     `/space-races/${raceId}/submit-answer`,
     { method: 'POST', auth: false, body: answerData }
@@ -266,12 +325,21 @@ export async function submitRaceAnswer(
 
 export async function startTeamQuiz(
   raceId: string,
-  data: { teamId: number; participantId: string }
+  data: {
+    teamId: number;
+    participantId: string;
+    quizId?: string;
+    timerSeconds?: number;
+    studentName?: string;
+    studentUid?: string;
+  }
 ) {
+  await assertJoinWindowAllowsWrite(raceId, data.teamId, { allowIfTeamStarted: true });
+  const device = data.studentUid ? {} : await guestDevicePayload();
   return apiRequest(`/space-races/${raceId}/start-quiz`, {
     method: 'POST',
     auth: false,
-    body: data,
+    body: { ...data, ...device },
   });
 }
 

@@ -6,16 +6,12 @@ import { db } from '../../firebaseConfig';
 /** Stable empty list — avoids new array references on every render when using useRtdbList */
 export const RTDB_EMPTY_LIST: any[] = Object.freeze([]) as any;
 
-const snapshotsEqual = (prev: unknown, next: unknown) => {
-  if (prev === next) return true;
-  if (prev == null || next == null) return false;
-  if (typeof prev !== 'object' || typeof next !== 'object') return false;
-  try {
-    return JSON.stringify(prev) === JSON.stringify(next);
-  } catch {
-    return false;
-  }
-};
+/** Shallow copy so React always gets a new root when RTDB reuses/mutates snap.val(). */
+function cloneRtdbVal(val: unknown) {
+  if (val == null || typeof val !== 'object') return val;
+  if (Array.isArray(val)) return val.slice();
+  return { ...(val as Record<string, unknown>) };
+}
 
 export function useRtdbValue(
   path: string | null | undefined,
@@ -23,7 +19,14 @@ export function useRtdbValue(
     enabled = true,
     orderBy,
     equalToValue,
-  }: { enabled?: boolean; orderBy?: string; equalToValue?: string | number | null } = {}
+    resyncKey = 0,
+  }: {
+    enabled?: boolean;
+    orderBy?: string;
+    equalToValue?: string | number | null;
+    /** Bump to detach/reattach after background or account change. */
+    resyncKey?: number | string;
+  } = {}
 ) {
   const [value, setValue] = useState<any>(null);
   const [loading, setLoading] = useState(Boolean(enabled && path));
@@ -37,8 +40,6 @@ export function useRtdbValue(
     }
 
     let cancelled = false;
-    setValue(null);
-    setLoading(true);
     setError(null);
 
     const baseRef = dbRef(db, path);
@@ -51,8 +52,8 @@ export function useRtdbValue(
       r,
       (snap) => {
         if (cancelled) return;
-        const next = snap.exists() ? snap.val() : null;
-        setValue((prev: unknown) => (snapshotsEqual(prev, next) ? prev : next));
+        const next = cloneRtdbVal(snap.exists() ? snap.val() : null);
+        setValue(next);
         setLoading(false);
       },
       (err) => {
@@ -64,13 +65,13 @@ export function useRtdbValue(
 
     return () => {
       cancelled = true;
-      try {
+      if (typeof unsub === 'function') {
         unsub();
-      } catch {
-        off(r);
+        return;
       }
+      off(r);
     };
-  }, [enabled, path, orderBy, equalToValue]);
+  }, [enabled, path, orderBy, equalToValue, resyncKey]);
 
   return { value, loading, error };
 }
@@ -85,6 +86,8 @@ export function useRtdbList(
     empty = RTDB_EMPTY_LIST,
     orderBy,
     equalToValue,
+    resyncKey = 0,
+    filterKey = 0,
   }: {
     enabled?: boolean;
     sort?: (a: any, b: any) => number;
@@ -93,9 +96,17 @@ export function useRtdbList(
     empty?: any[];
     orderBy?: string;
     equalToValue?: string | number | null;
+    resyncKey?: number | string;
+    /** Bump when filter/sort identity should rebuild the list without a new snapshot. */
+    filterKey?: string | number;
   } = {}
 ) {
-  const { value, loading, error } = useRtdbValue(path, { enabled, orderBy, equalToValue });
+  const { value, loading, error } = useRtdbValue(path, {
+    enabled,
+    orderBy,
+    equalToValue,
+    resyncKey,
+  });
 
   const filterRef = useRef(filter);
   const sortRef = useRef(sort);
@@ -112,7 +123,7 @@ export function useRtdbList(
     if (typeof sortRef.current === 'function') items = items.slice().sort(sortRef.current);
     if (typeof mapRef.current === 'function') items = items.map(mapRef.current);
     return items;
-  }, [value, empty]);
+  }, [value, empty, filterKey]);
 
   return { list, loading, error };
 }

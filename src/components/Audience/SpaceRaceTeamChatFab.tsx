@@ -4,6 +4,7 @@ import {
   ActivityIndicator,
   FlatList,
   Image,
+  Keyboard,
   Linking,
   Platform,
   Pressable,
@@ -14,6 +15,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { TeamChatImageViewer } from '@/components/Audience/TeamChatImageViewer';
 import { KeyboardAwareBottomSheet } from '@/components/KeyboardAwareBottomSheet';
 import { useKeyboardIsOpen } from '@/components/KeyboardSafeScreen';
 import { showAlert, showToast } from '@/components/feedback';
@@ -153,9 +155,11 @@ type Props = {
   raceId: string | null;
   teamId: number | string | null | undefined;
   participant: { id?: string; name?: string } | null;
+  /** Close the sheet (Time's Up) so the closed card is visible. */
+  forceClosed?: boolean;
 };
 
-export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
+export function SpaceRaceTeamChatFab({ raceId, teamId, participant, forceClosed = false }: Props) {
   const insets = useSafeAreaInsets();
   const keyboardOpen = useKeyboardIsOpen();
   const [open, setOpen] = useState(false);
@@ -178,6 +182,12 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
   const unreadHydratedRef = useRef(false);
   const pickingImageRef = useRef(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!forceClosed) return;
+    setOpen(false);
+    Keyboard.dismiss();
+  }, [forceClosed]);
 
   const normalizedTeamId = teamId != null && teamId !== '' ? String(teamId) : null;
   const chatPath =
@@ -770,7 +780,9 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
     <>
       {!open ? (
         <Pressable
-          onPress={() => setOpen(true)}
+          onPress={() => {
+            if (!forceClosed) setOpen(true);
+          }}
           accessibilityRole="button"
           accessibilityLabel="Open team chat"
           style={[styles.fab, { bottom: Math.max(insets.bottom, 16) + 8 }]}>
@@ -784,7 +796,7 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
       ) : null}
 
       <KeyboardAwareBottomSheet
-        visible={open}
+        visible={open && !forceClosed}
         onClose={() => setOpen(false)}
         header={
           <View style={styles.sheetHeader}>
@@ -925,12 +937,8 @@ export function SpaceRaceTeamChatFab({ raceId, teamId, participant }: Props) {
             ) : null}
             </View>
 
-            {selectedImage ? (
-              <Pressable style={styles.lightbox} onPress={() => setSelectedImage(null)}>
-                <Image source={{ uri: selectedImage }} style={styles.lightboxImg} resizeMode="contain" />
-              </Pressable>
-            ) : null}
       </KeyboardAwareBottomSheet>
+      <TeamChatImageViewer uri={selectedImage} onClose={() => setSelectedImage(null)} />
     </>
   );
 }
@@ -1099,13 +1107,4 @@ const styles = StyleSheet.create({
   },
   disabled: { opacity: 0.5 },
   sending: { fontSize: 12, color: COLORS.mutedText, marginTop: 6 },
-  lightbox: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(0,0,0,0.8)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING[4],
-    zIndex: 30,
-  },
-  lightboxImg: { width: '100%', height: '80%' },
 });

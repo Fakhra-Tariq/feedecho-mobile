@@ -337,8 +337,16 @@ export default function ExploreScreen() {
             </View>
 
             <Pressable
-              style={({ pressed }) => [styles.endSessionBtn, pressed && styles.endSessionBtnPressed]}
-              onPress={() => setShowEndConfirm(true)}
+              style={({ pressed }) => [
+                styles.endSessionBtn,
+                pressed && styles.endSessionBtnPressed,
+                ending && styles.endSessionBtnPressed,
+              ]}
+              onPress={() => {
+                if (ending) return;
+                setShowEndConfirm(true);
+              }}
+              disabled={ending}
               accessibilityRole="button"
               accessibilityLabel="End session">
               <Ionicons name="close" size={16} color={COLORS.white} />
@@ -420,7 +428,7 @@ export default function ExploreScreen() {
       <ConfirmModal
         visible={showEndConfirm}
         title="End Session?"
-        message="Are you sure you want to end this session? This action cannot be undone."
+        message="Are you sure you want to end this session? The active activity will end too. This action cannot be undone."
         confirmLabel="End Session"
         destructive
         busy={ending}

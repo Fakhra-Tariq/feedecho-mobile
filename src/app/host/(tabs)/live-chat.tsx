@@ -1,6 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
-import { LinearGradient } from 'expo-linear-gradient';
 import { useNavigation } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -15,16 +14,19 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ChatMessageBubble } from '@/components/chat/ChatMessageBubble';
 import { showAlert, showToast } from '@/components/feedback';
-import { cleanErrorMessage, showLaunchFailureAlert } from '@/lib/activeActivity';
+import { blockMobileLaunchIfBusy, cleanErrorMessage, showLaunchFailureAlert } from '@/lib/activeActivity';
+import { ANOTHER_ACTIVITY_LIVE_HINT, liveActivityBlocksLaunch } from '@/lib/liveHostActivity';
 import { ActivityCreatedModal } from '@/components/ActivityCreatedModal';
 import { ConfirmModal } from '@/components/ConfirmModal';
 import { CreateSessionModal } from '@/components/CreateSessionModal';
+import { HostNoSessionBanner } from '@/components/HostNoSessionBanner';
 import { HeroHowItWorksLink } from '@/components/HostHeroChrome';
 import {
   KEYBOARD_SCROLL_PROPS,
@@ -37,15 +39,20 @@ import { useAuth } from '@/context/AuthContext';
 import { useHostSessions, useSessionActivityLabel } from '@/context/HostSessionContext';
 import {
   addChatMessage,
+  audienceMessageLabel,
   createAnonymousChat,
   deleteAnonymousChat,
   endAnonymousChat,
   isChatActive,
-  listAnonymousChats,
+  isChatNamesVisible,
+  isNamedAudienceMessage,
   syncChatStats,
   toggleChatModeration,
+  toggleChatNamesVisible,
   type ChatSession,
 } from '@/lib/anonymousChat';
+import { isClaimedCurrentActivity, isLinkedSessionInactive } from '@/lib/sessionActivityMatch';
+import { TAB_BAR_CONTENT_HEIGHT } from '@/lib/tabBarSafeArea';
 import { toParticipantCount } from '@/lib/toParticipantCount';
 import { useRtdbList, useRtdbValue } from '@/lib/useRtdb';
 
@@ -62,24 +69,68 @@ function formatEndedDate(iso?: string) {
   }
 }
 
+function NamesToggleButton({
+  namesVisible,
+  disabled,
+  onPress,
+}: {
+  namesVisible: boolean;
+  disabled: boolean;
+  onPress: () => void;
+}) {
+  const { width } = useWindowDimensions();
+  const showLabel = width >= 400;
+  const label = namesVisible ? 'Names visible' : 'Names hidden';
+
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      accessibilityRole="switch"
+      accessibilityLabel={label}
+      accessibilityState={{ checked: namesVisible, disabled }}
+      style={[
+        styles.namesBtn,
+        namesVisible && styles.namesBtnOn,
+        disabled && styles.namesBtnDisabled,
+      ]}>
+      <Ionicons
+        name={namesVisible ? 'eye-outline' : 'eye-off-outline'}
+        size={16}
+        color={namesVisible ? '#4A1F3D' : '#6D415F'}
+      />
+      {showLabel ? (
+        <Text
+          style={[styles.namesLabel, namesVisible && styles.namesLabelOn]}
+          numberOfLines={1}>
+          {label}
+        </Text>
+      ) : null}
+      <View
+        style={[styles.namesSwitchTrack, namesVisible && styles.namesSwitchTrackOn]}
+        accessibilityElementsHidden>
+        <View style={[styles.namesSwitchThumb, namesVisible && styles.namesSwitchThumbOn]} />
+      </View>
+    </Pressable>
+  );
+}
+
 export default function HostLiveChatScreen() {
-  const { profile } = useAuth();
-  const { activeSession, createSession } = useHostSessions();
+  const { profile, user } = useAuth();
+  const { activeSession, createSession, liveActivity, sessions, liveChats, liveChatsLoading } =
+    useHostSessions();
   const activityStatus = useSessionActivityLabel();
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
-  const uid = profile?.uid || '';
+  const uid = String(user?.uid || profile?.uid || '').trim();
 
-  const { list: rtdbChats } = useRtdbList('chat_sessions', {
-    enabled: Boolean(uid),
-    filter: (chat) => {
-      if (!uid) return true;
-      return chat?.createdBy === uid || chat?.createdBy == null;
-    },
-    sort: (a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')),
-  });
-
-  const [apiChats, setApiChats] = useState<ChatSession[]>([]);
+  const rtdbChats = useMemo(
+    () =>
+      [...(liveChats as ChatSession[])].sort((a, b) =>
+        String(b.createdAt || '').localeCompare(String(a.createdAt || ''))
+      ),
+    [liveChats]
+  );
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [listTab, setListTab] = useState<ListTab>('active');
   const [showCreate, setShowCreate] = useState(false);
@@ -92,10 +143,12 @@ export default function HostLiveChatScreen() {
   const [messageDraft, setMessageDraft] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [togglingMod, setTogglingMod] = useState(false);
+  const [togglingNames, setTogglingNames] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
   const [howItWorksOpen, setHowItWorksOpen] = useState(false);
   const [showCreateSession, setShowCreateSession] = useState(false);
   const [sessionNameDraft, setSessionNameDraft] = useState('');
+  const [createdSessionCode, setCreatedSessionCode] = useState('');
   const [creatingSession, setCreatingSession] = useState(false);
   const syncedStatsRef = useRef(new Set<string>());
   const selectedChatIdRef = useRef<string | null>(null);
@@ -104,29 +157,34 @@ export default function HostLiveChatScreen() {
   const [pendingChatEnds, setPendingChatEnds] = useState<string[]>([]);
 
   const sidebarChats = useMemo(() => {
-    const source = rtdbChats.length > 0 ? rtdbChats : apiChats;
-    return source
+    return rtdbChats
       .filter((chat) => !pendingChatDeletes.includes(chat.id))
       .map((chat) =>
         pendingChatEnds.includes(chat.id)
           ? { ...chat, status: 'ended' as const, isActive: false }
           : chat
       );
-  }, [rtdbChats, apiChats, pendingChatDeletes, pendingChatEnds]);
+  }, [rtdbChats, pendingChatDeletes, pendingChatEnds]);
 
   useEffect(() => {
-    const source = rtdbChats.length > 0 ? rtdbChats : apiChats;
-    setPendingChatDeletes((ids) => ids.filter((id) => source.some((c) => c.id === id)));
+    setPendingChatDeletes((ids) => ids.filter((id) => rtdbChats.some((c) => c.id === id)));
     setPendingChatEnds((ids) =>
       ids.filter((id) => {
-        const live = source.find((c) => c.id === id);
+        const live = rtdbChats.find((c) => c.id === id);
         return Boolean(live && isChatActive(live));
       })
     );
-  }, [rtdbChats, apiChats]);
-  const activeChats = sidebarChats.filter((chat) => isChatActive(chat));
+  }, [rtdbChats]);
+  const chatIsLive = (chat: ChatSession | null | undefined) =>
+    Boolean(
+      chat &&
+        (isClaimedCurrentActivity('livechat', chat.id, activeSession) ||
+          (isChatActive(chat) &&
+            !isLinkedSessionInactive(chat as Record<string, unknown>, sessions)))
+    );
+  const activeChats = sidebarChats.filter((chat) => chatIsLive(chat));
   const endedChats = sidebarChats.filter(
-    (chat) => chat.status === 'ended' || chat.isActive === false
+    (chat) => !chatIsLive(chat) && (chat.status === 'ended' || chat.isActive === false || isLinkedSessionInactive(chat as Record<string, unknown>, sessions))
   );
   const listed = listTab === 'active' ? activeChats : endedChats;
 
@@ -153,15 +211,10 @@ export default function HostLiveChatScreen() {
   }, [selectedChatId, selectedLive, sidebarChats]);
 
   const moderationOn = Boolean(selectedLive?.settings?.moderationMode);
-  const chatIsActive = isChatActive(selectedChat);
+  const namesVisible = isChatNamesVisible(selectedChat);
+  const chatIsActive = chatIsLive(selectedChat);
+  const namesToggleDisabled = !selectedChat || !chatIsActive;
   const participantCount = toParticipantCount(selectedLive?.participants);
-
-  useEffect(() => {
-    if (!uid) return;
-    listAnonymousChats()
-      .then(setApiChats)
-      .catch(() => undefined);
-  }, [uid]);
 
   useEffect(() => {
     const ids = [...activeChats, ...endedChats].map((c) => c.id).filter(Boolean);
@@ -180,10 +233,9 @@ export default function HostLiveChatScreen() {
   selectedChatIdRef.current = selectedChatId;
 
   /**
-   * List and room share `/host/live-chat`. Default stack back (header arrow,
-   * Android hardware back, swipe) pops this screen to Explore. While a room
-   * is open, intercept that and only clear selectedChatId so the list
-   * returns; do not change chat data. List back then pops to Explore.
+   * List and room share `/host/live-chat` (Chat tab). While a room is open,
+   * intercept GO_BACK / POP / hardware back and only clear selectedChatId
+   * so the list returns. Tab switches (NAVIGATE) are not blocked.
    */
   useEffect(() => {
     const closeOpenRoom = () => {
@@ -234,13 +286,7 @@ export default function HostLiveChatScreen() {
     };
   }, []);
 
-  const loadApi = async () => {
-    try {
-      setApiChats(await listAnonymousChats());
-    } catch {
-      // RTDB list remains source of truth
-    }
-  };
+  const chatLaunchBlocked = liveActivityBlocksLaunch(liveActivity);
 
   const onCreate = async () => {
     if (!createTitle.trim() || isCreating) return;
@@ -253,6 +299,7 @@ export default function HostLiveChatScreen() {
       });
       return;
     }
+    if (blockMobileLaunchIfBusy(liveActivity, { type: 'livechat' })) return;
     if (activeChats.length > 0) {
       showAlert({
         type: 'warning',
@@ -276,7 +323,6 @@ export default function HostLiveChatScreen() {
       setCreatedCode(chat.joinCode || '');
       setSelectedChatId(chat.id);
       setListTab('active');
-      await loadApi();
     } catch (error) {
       showLaunchFailureAlert(activeSession?.currentActivity, error, 'Try again');
     } finally {
@@ -284,10 +330,13 @@ export default function HostLiveChatScreen() {
     }
   };
 
-  const openCreateChat = () => setShowCreate(true);
+  const openCreateChat = () => {
+    if (blockMobileLaunchIfBusy(liveActivity, { type: 'livechat' })) return;
+    setShowCreate(true);
+  };
 
   const onToggleModeration = async () => {
-    if (!selectedChatId || togglingMod) return;
+    if (!selectedChatId || togglingMod || !chatIsActive) return;
     setTogglingMod(true);
     try {
       await toggleChatModeration(selectedChatId, !moderationOn);
@@ -303,12 +352,28 @@ export default function HostLiveChatScreen() {
     }
   };
 
+  const onToggleNamesVisible = async () => {
+    if (!selectedChatId || togglingNames || namesToggleDisabled) return;
+    setTogglingNames(true);
+    try {
+      await toggleChatNamesVisible(selectedChatId, !namesVisible);
+    } catch (error) {
+      showAlert({
+        type: 'error',
+        title: 'Failed',
+        message: cleanErrorMessage(error, 'Could not toggle names visibility'),
+        primary: { label: 'Close' },
+      });
+    } finally {
+      setTogglingNames(false);
+    }
+  };
+
   const onEndChat = async (chatId: string) => {
     try {
       await endAnonymousChat(chatId);
       if (selectedChatId === chatId) setSelectedChatId(null);
       setPendingChatEnds((ids) => (ids.includes(chatId) ? ids : [...ids, chatId]));
-      await loadApi();
       showToast({ type: 'success', title: 'Ended', message: 'Chat ended' });
     } catch (error) {
       showAlert({
@@ -330,7 +395,6 @@ export default function HostLiveChatScreen() {
         ids.includes(deleteTarget) ? ids : [...ids, deleteTarget]
       );
       setDeleteTarget(null);
-      await loadApi();
       showToast({ type: 'success', title: 'Removed', message: 'Chat deleted' });
     } catch (error) {
       showAlert({
@@ -398,7 +462,9 @@ export default function HostLiveChatScreen() {
           style={[
             styles.roomCard,
             {
-              marginBottom: keyboardOpen ? 0 : Math.max(insets.bottom, 8),
+              marginBottom: keyboardOpen
+                ? 0
+                : TAB_BAR_CONTENT_HEIGHT + Math.max(insets.bottom, 8),
             },
           ]}>
           <View style={styles.roomHeader}>
@@ -438,21 +504,31 @@ export default function HostLiveChatScreen() {
 
           {chatIsActive ? (
             <View style={styles.roomActions}>
-              <Pressable
-                style={[styles.moderationBtn, moderationOn && styles.moderationBtnOn]}
-                onPress={onToggleModeration}
-                disabled={togglingMod}
-                accessibilityRole="button"
-                accessibilityLabel={moderationOn ? 'Moderation ON' : 'Moderation OFF'}>
-                <Ionicons
-                  name="settings-outline"
-                  size={16}
-                  color={moderationOn ? COLORS.white : COLORS.primary}
+              <View style={styles.toggleRow}>
+                <Pressable
+                  style={[styles.moderationBtn, moderationOn && styles.moderationBtnOn]}
+                  onPress={onToggleModeration}
+                  disabled={togglingMod || namesToggleDisabled}
+                  accessibilityRole="button"
+                  accessibilityLabel={moderationOn ? 'Moderation ON' : 'Moderation OFF'}
+                  accessibilityState={{ disabled: togglingMod || namesToggleDisabled }}>
+                  <Ionicons
+                    name="settings-outline"
+                    size={16}
+                    color={moderationOn ? COLORS.white : COLORS.primary}
+                  />
+                  <Text
+                    style={[styles.moderationLabel, moderationOn && styles.moderationLabelOn]}
+                    numberOfLines={1}>
+                    {togglingMod ? '…' : moderationOn ? 'Moderation ON' : 'Moderation OFF'}
+                  </Text>
+                </Pressable>
+                <NamesToggleButton
+                  namesVisible={namesVisible}
+                  disabled={namesToggleDisabled || togglingNames}
+                  onPress={onToggleNamesVisible}
                 />
-                <Text style={[styles.moderationLabel, moderationOn && styles.moderationLabelOn]}>
-                  {togglingMod ? '…' : moderationOn ? 'Moderation ON' : 'Moderation OFF'}
-                </Text>
-              </Pressable>
+              </View>
               <Pressable
                 style={({ pressed }) => [styles.endChatBtn, pressed && styles.endChatBtnPressed]}
                 onPress={() =>
@@ -502,14 +578,18 @@ export default function HostLiveChatScreen() {
                 </Text>
               </View>
             }
-            renderItem={({ item }) => (
-              <ChatMessageBubble
-                message={item}
-                isOwn={Boolean(item.isTeacher)}
-                label={item.isTeacher ? 'You' : 'Audience'}
-                showStudentDot={!item.isTeacher}
-              />
-            )}
+            renderItem={({ item }) => {
+              const fromTeacher = Boolean(item.isTeacher);
+              return (
+                <ChatMessageBubble
+                  message={item}
+                  isOwn={fromTeacher}
+                  label={fromTeacher ? 'You' : audienceMessageLabel(item)}
+                  namedSender={isNamedAudienceMessage(item, { fromTeacher })}
+                  showStudentDot={!fromTeacher}
+                />
+              );
+            }}
           />
 
           {chatIsActive ? (
@@ -553,53 +633,52 @@ export default function HostLiveChatScreen() {
     <View style={styles.screen}>
       <ScrollView
         style={styles.pageScroll}
-        contentContainerStyle={styles.pageScrollContent}
+        contentContainerStyle={[
+          styles.pageScrollContent,
+          { paddingBottom: TAB_BAR_CONTENT_HEIGHT + insets.bottom + 20 },
+        ]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled">
-        <View style={styles.sessionPill} accessibilityRole="text">
-          <Ionicons
-            name={activeSession ? 'checkmark-circle-outline' : 'alert-circle-outline'}
-            size={16}
-            color="#6B3A5C"
-          />
-          {activeSession ? (
+        {activeSession ? (
+          <View style={styles.sessionPill} accessibilityRole="text">
+            <Ionicons name="checkmark-circle-outline" size={16} color="#6B3A5C" />
             <Text style={styles.sessionPillText}>
               {'Launching to session: '}
               <Text style={styles.sessionPillCode}>{sessionCode}</Text>
               {` · ${activityStatus}`}
             </Text>
-          ) : (
-            <Text style={styles.sessionPillText}>
-              {"You'll need an active session to launch this. "}
-              <Text
-                style={styles.sessionPillLink}
-                onPress={() => setShowCreateSession(true)}
-                accessibilityRole="link">
-                Create Session
-              </Text>
-            </Text>
-          )}
-        </View>
+          </View>
+        ) : (
+          <HostNoSessionBanner
+            style={styles.sessionIdleBanner}
+            onCreateSession={() => setShowCreateSession(true)}
+          />
+        )}
 
-        <LinearGradient
-          colors={['#6D415F', 'rgba(109,65,95,0.92)', '#3A2E2A']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.heroCard}>
+        <View style={styles.heroCard}>
           <View style={styles.heroTitleRow}>
             <Text style={styles.heroTitle}>Anonymous Chat</Text>
             <HeroHowItWorksLink onPress={() => setHowItWorksOpen(true)} />
           </View>
           <Text style={styles.heroSubtitle}>Anonymous Q&A and feedback sessions</Text>
           <Pressable
-            style={({ pressed }) => [styles.newChatBtn, pressed && styles.newChatBtnPressed]}
+            style={({ pressed }) => [
+              styles.newChatBtn,
+              chatLaunchBlocked && styles.newChatBtnDisabled,
+              pressed && !chatLaunchBlocked && styles.newChatBtnPressed,
+            ]}
             onPress={openCreateChat}
+            disabled={chatLaunchBlocked}
             accessibilityRole="button"
-            accessibilityLabel="New chat">
+            accessibilityLabel={chatLaunchBlocked ? 'New chat, another activity is live' : 'New chat'}
+            accessibilityState={{ disabled: chatLaunchBlocked }}>
             <Ionicons name="chatbubble-outline" size={18} color="#6D415F" />
             <Text style={styles.newChatLabel}>New Chat</Text>
           </Pressable>
-        </LinearGradient>
+          {chatLaunchBlocked ? (
+            <Text style={styles.busyHint}>{ANOTHER_ACTIVITY_LIVE_HINT}</Text>
+          ) : null}
+        </View>
 
         <View style={styles.contentCard}>
           <View style={styles.tabs}>
@@ -622,7 +701,11 @@ export default function HostLiveChatScreen() {
             })}
           </View>
 
-          {listed.length === 0 ? (
+          {liveChatsLoading && rtdbChats.length === 0 ? (
+            <View style={styles.emptyWrap}>
+              <ActivityIndicator color={COLORS.primary} />
+            </View>
+          ) : listed.length === 0 ? (
             <View style={styles.emptyWrap}>
               {listTab === 'active' ? (
                 <>
@@ -632,11 +715,16 @@ export default function HostLiveChatScreen() {
                   <Pressable
                     style={({ pressed }) => [
                       styles.emptyCreateBtn,
-                      pressed && styles.emptyCreateBtnPressed,
+                      chatLaunchBlocked && styles.createSubmitDisabled,
+                      pressed && !chatLaunchBlocked && styles.emptyCreateBtnPressed,
                     ]}
                     onPress={openCreateChat}
+                    disabled={chatLaunchBlocked}
                     accessibilityRole="button"
-                    accessibilityLabel="Create chat">
+                    accessibilityLabel={
+                      chatLaunchBlocked ? 'Create chat, another activity is live' : 'Create chat'
+                    }
+                    accessibilityState={{ disabled: chatLaunchBlocked }}>
                     <Ionicons name="add" size={18} color={COLORS.white} />
                     <Text style={styles.emptyCreateLabel}>Create Chat</Text>
                   </Pressable>
@@ -840,14 +928,23 @@ export default function HostLiveChatScreen() {
               <Pressable
                 style={({ pressed }) => [
                   styles.createSubmitBtn,
-                  (!createTitle.trim() || isCreating) && styles.createSubmitDisabled,
-                  createTitle.trim() && !isCreating && pressed && styles.createSubmitPressed,
+                  (!createTitle.trim() || isCreating || chatLaunchBlocked) &&
+                    styles.createSubmitDisabled,
+                  createTitle.trim() &&
+                    !isCreating &&
+                    !chatLaunchBlocked &&
+                    pressed &&
+                    styles.createSubmitPressed,
                 ]}
                 onPress={onCreate}
-                disabled={!createTitle.trim() || isCreating}
+                disabled={!createTitle.trim() || isCreating || chatLaunchBlocked}
                 accessibilityRole="button"
-                accessibilityLabel="Create chat"
-                accessibilityState={{ disabled: !createTitle.trim() || isCreating }}>
+                accessibilityLabel={
+                  chatLaunchBlocked ? 'Create chat, another activity is live' : 'Create chat'
+                }
+                accessibilityState={{
+                  disabled: !createTitle.trim() || isCreating || chatLaunchBlocked,
+                }}>
                 {isCreating ? (
                   <ActivityIndicator color={COLORS.white} />
                 ) : (
@@ -877,6 +974,13 @@ export default function HostLiveChatScreen() {
         onClose={() => setCreatedCode('')}
       />
 
+      <ActivityCreatedModal
+        visible={Boolean(createdSessionCode)}
+        title="Session Created!"
+        code={createdSessionCode}
+        onClose={() => setCreatedSessionCode('')}
+      />
+
       <CreateSessionModal
         visible={showCreateSession}
         title="Create Session"
@@ -891,10 +995,10 @@ export default function HostLiveChatScreen() {
           if (creatingSession || !sessionNameDraft.trim()) return;
           setCreatingSession(true);
           try {
-            await createSession(sessionNameDraft.trim());
+            const session = await createSession(sessionNameDraft.trim());
             setShowCreateSession(false);
             setSessionNameDraft('');
-            showToast({ type: 'success', title: 'Created', message: 'Session created successfully!' });
+            setCreatedSessionCode(session.sessionCode);
           } catch (error) {
             showAlert({
               type: 'error',
@@ -941,6 +1045,10 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
     marginTop: 12,
   },
+  sessionIdleBanner: {
+    marginHorizontal: 16,
+    marginTop: 12,
+  },
   sessionPillText: {
     flex: 1,
     color: '#4A1F3D',
@@ -961,6 +1069,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 20,
     overflow: 'hidden',
+    backgroundColor: COLORS.primary,
   },
   heroTitleRow: {
     flexDirection: 'row',
@@ -1003,6 +1112,15 @@ const styles = StyleSheet.create({
   },
   newChatBtnPressed: {
     backgroundColor: '#F4EAF0',
+  },
+  newChatBtnDisabled: {
+    opacity: 0.55,
+  },
+  busyHint: {
+    marginTop: 8,
+    fontSize: 12,
+    color: '#EADBE5',
+    textAlign: 'center',
   },
   newChatLabel: {
     color: '#6D415F',
@@ -1309,11 +1427,14 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   roomActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
+    gap: 8,
     paddingHorizontal: 14,
     paddingBottom: 14,
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 8,
   },
   moderationBtn: {
     flex: 1,
@@ -1328,6 +1449,58 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 8,
   },
+  namesBtn: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 12,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: 'rgba(109,65,95,0.4)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+  },
+  namesBtnOn: {
+    backgroundColor: COLORS.white,
+    borderColor: '#6B3A5C',
+  },
+  namesBtnDisabled: {
+    opacity: 0.5,
+  },
+  namesLabel: {
+    flexShrink: 1,
+    minWidth: 0,
+    color: '#6D415F',
+    fontSize: 13,
+    fontWeight: FONT_WEIGHTS.medium,
+  },
+  namesLabelOn: {
+    color: '#4A1F3D',
+    fontWeight: '500',
+  },
+  namesSwitchTrack: {
+    width: 36,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(109,65,95,0.25)',
+    justifyContent: 'center',
+    paddingHorizontal: 2,
+    flexShrink: 0,
+  },
+  namesSwitchTrackOn: {
+    backgroundColor: '#6B3A5C',
+  },
+  namesSwitchThumb: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: COLORS.white,
+  },
+  namesSwitchThumbOn: {
+    alignSelf: 'flex-end',
+  },
   moderationBtnOn: {
     backgroundColor: '#6D415F',
     borderColor: '#6D415F',
@@ -1341,8 +1514,7 @@ const styles = StyleSheet.create({
     color: COLORS.white,
   },
   endChatBtn: {
-    flex: 1.4,
-    height: 44,
+    minHeight: 44,
     borderRadius: 12,
     backgroundColor: '#EF4444',
     alignItems: 'center',

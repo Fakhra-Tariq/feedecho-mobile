@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useLocalSearchParams } from 'expo-router';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocalSearchParams, useNavigation } from 'expo-router';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -15,13 +15,16 @@ import {
   KEYBOARD_BOTTOM_GAP,
   KeyboardSafeScreen,
 } from '@/components/KeyboardSafeScreen';
+import { AudienceActivityHeader } from '@/components/Audience/AudienceActivityHeader';
 import { GuestProgressLoginBanner } from '@/components/Audience/GuestProgressLoginBanner';
+import { StudentAccountButton } from '@/components/HostProfileButton';
 import { QuizQuestionNavButtons } from '@/components/Audience/QuizQuestionNavButtons';
 import { showAlert } from '@/components/feedback';
 import { AppButton } from '@/components/ui';
 import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING, TYPE } from '@/constants/theme';
 import { cleanErrorMessage } from '@/lib/activeActivity';
 import { useAuth } from '@/context/AuthContext';
+import { getAudiencePostActivityHomeLabel } from '@/lib/audiencePostActivityHomeLabel';
 import { useLeaveActivity } from '@/lib/audienceHomeNavigation';
 import { normalizeQuizTypeLabel } from '@/lib/aiGeneratedQuiz';
 import {
@@ -31,6 +34,7 @@ import {
   saveLocalQuizSubmission,
   type AudienceQuizSession,
 } from '@/lib/audienceQuizSession';
+import { guestDevicePayload } from '@/lib/audienceDeviceId';
 import { submitQuizWithRetry } from '@/lib/audienceQuizSubmit';
 import {
   applyQuizShuffleSettings,
@@ -114,13 +118,20 @@ function remainingFromOriginalStart(quizData: any, startedAtIso?: string | null)
  * Guests omit studentUid/studentEmail on submit (matches Web).
  */
 export default function AudienceQuizScreen() {
-  const { profile } = useAuth();
+  const { profile, loading: authLoading } = useAuth();
   const isGuest = Boolean(profile?.guest);
-  const params = useLocalSearchParams<{ quizId?: string; alreadySubmitted?: string }>();
+  const leaveHomeLabel = getAudiencePostActivityHomeLabel(profile, authLoading);
+  const params = useLocalSearchParams<{
+    quizId?: string;
+    alreadySubmitted?: string;
+    alreadyAttemptedOnDevice?: string;
+  }>();
   const quizIdParam = String(params.quizId || '');
   const alreadySubmittedParam = String(params.alreadySubmitted || '') === '1';
+  const alreadyAttemptedOnDeviceParam = String(params.alreadyAttemptedOnDevice || '') === '1';
   const isLoggedInStudent = Boolean(profile?.uid && !profile?.guest);
-  const { leave: goHome } = useLeaveActivity();
+  const navigation = useNavigation();
+  const { leave: goHome } = useLeaveActivity({ headerBack: false });
   const leftResultRef = useRef(false);
   const [redirectCountdown, setRedirectCountdown] = useState(10);
 
@@ -132,6 +143,7 @@ export default function AudienceQuizScreen() {
   const [answers, setAnswers] = useState<Record<string, any>>({});
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
   const [isSubmitted, setIsSubmitted] = useState(false);
+  const [guestBlockedOnDevice, setGuestBlockedOnDevice] = useState(alreadyAttemptedOnDeviceParam);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [resultScore, setResultScore] = useState<{
     percentage: number;
@@ -146,6 +158,28 @@ export default function AudienceQuizScreen() {
   const answersRef = useRef<Record<string, any>>({});
   const currentQuestionRef = useRef(0);
   const originalParticipantIdRef = useRef<string | null>(null);
+
+  const quizHeaderTitle = String(quiz?.title || session?.quizTitle || '').trim();
+  const guestHeaderName = String(session?.studentName || profile?.name || '').trim();
+
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerShown: false,
+      headerBackVisible: false,
+      headerLeft: () => null,
+      headerRight: () => null,
+    });
+  }, [navigation]);
+
+  const activityHeader = (
+    <AudienceActivityHeader
+      activityLabel="Quiz"
+      title={quizHeaderTitle || 'Quiz'}
+      participantName={guestHeaderName}
+      isLoggedIn={isLoggedInStudent}
+      rightSlot={isGuest ? undefined : <StudentAccountButton />}
+    />
+  );
 
   const leaveHomeOnce = () => {
     if (leftResultRef.current) return;
@@ -188,6 +222,25 @@ export default function AudienceQuizScreen() {
           }
           setIsSubmitted(true);
         };
+
+        if (!isLoggedInStudent && (alreadyAttemptedOnDeviceParam || alreadySubmittedParam)) {
+          const foundQuiz =
+            stored?.quiz && String(stored.quizId) === String(targetQuizId) ? stored.quiz : stored?.quiz;
+          openSubmitted(
+            foundQuiz
+              ? {
+                  ...foundQuiz,
+                  id: foundQuiz.id || targetQuizId,
+                  type: normalizeQuizTypeLabel(foundQuiz.type),
+                  questions: normalizeQuestionsList(foundQuiz.questions),
+                  launched: true,
+                }
+              : null
+          );
+          setGuestBlockedOnDevice(true);
+          if (stored) setSession(stored);
+          return;
+        }
 
         if (isLoggedInStudent && (alreadySubmittedParam || participation?.status === 'submitted')) {
           const foundQuiz = stored?.quiz && String(stored.quizId) === String(targetQuizId) ? stored.quiz : null;
@@ -235,7 +288,6 @@ export default function AudienceQuizScreen() {
         }
         if (
           !isLoggedInStudent &&
-          foundQuiz.launchSettings?.oneAttempt &&
           (await hasLocalQuizSubmission(String(stored.quizId), {
             participantId: stored.participantId,
             studentUid: stored.studentUid,
@@ -243,7 +295,15 @@ export default function AudienceQuizScreen() {
             studentName: stored.studentName,
           }))
         ) {
-          if (!cancelled) setError('You have already completed this quiz.');
+          openSubmitted({
+            ...foundQuiz,
+            id: foundQuiz.id || stored.quizId,
+            type: normalizeQuizTypeLabel(foundQuiz.type),
+            questions: normalizeQuestionsList(foundQuiz.questions),
+            launched: true,
+          });
+          setGuestBlockedOnDevice(true);
+          setSession(stored);
           return;
         }
 
@@ -304,6 +364,7 @@ export default function AudienceQuizScreen() {
   }, [
     quizIdParam,
     alreadySubmittedParam,
+    alreadyAttemptedOnDeviceParam,
     isLoggedInStudent,
     profile?.uid,
     profile?.email,
@@ -327,7 +388,7 @@ export default function AudienceQuizScreen() {
   }, [timeLeft, isSubmitted]);
 
   useEffect(() => {
-    if (!isSubmitted) return undefined;
+    if (!isSubmitted || guestBlockedOnDevice) return undefined;
     setRedirectCountdown(10);
     const id = setInterval(() => {
       setRedirectCountdown((prev) => {
@@ -419,6 +480,8 @@ export default function AudienceQuizScreen() {
       const guestName = session?.studentName || profile?.name || '';
       try {
         if (guestName && (await hasGuestSubmitted('quiz', String(quiz.id), guestName))) {
+          setGuestBlockedOnDevice(true);
+          setIsSubmitted(true);
           return;
         }
       } catch (checkErr) {
@@ -493,6 +556,7 @@ export default function AudienceQuizScreen() {
         timeTaken,
         ...(effectiveStudentUid ? { studentUid: effectiveStudentUid } : {}),
         ...(effectiveStudentEmail ? { studentEmail: effectiveStudentEmail } : {}),
+        ...(!effectiveStudentUid ? await guestDevicePayload() : {}),
       };
 
       if (!effectiveParticipantId) {
@@ -526,6 +590,15 @@ export default function AudienceQuizScreen() {
           percentage: syncResult.data?.percentage ?? percentage,
           correctAnswers: syncResult.data?.correctAnswers ?? correctAnswers,
           totalQuestions: quiz.questions.length,
+        });
+      } else if (syncResult.alreadyAttempted) {
+        setSyncFailed(false);
+        setSyncError('');
+        setGuestBlockedOnDevice(true);
+        await saveLocalQuizSubmission({
+          ...baseLocalSubmission,
+          serverSynced: true,
+          syncError: null,
         });
       } else {
         setSyncFailed(true);
@@ -561,22 +634,28 @@ export default function AudienceQuizScreen() {
 
   if (loading) {
     return (
-      <View style={styles.centered}>
-        <ActivityIndicator color={COLORS.primary} />
+      <View style={styles.screen}>
+        {activityHeader}
+        <View style={styles.centered}>
+          <ActivityIndicator color={COLORS.primary} />
+        </View>
       </View>
     );
   }
 
   if (!isSubmitted && (error || !quiz || questions.length === 0)) {
     return (
-      <View style={styles.centered}>
-        <Ionicons name="alert-circle-outline" size={48} color={COLORS.iconMuted} />
-        <Text style={styles.errorTitle}>{error || 'Quiz not available'}</Text>
-        <AppButton
-          label="Back"
-          onPress={goHome}
-          style={{ marginTop: SPACING[4], minWidth: 160 }}
-        />
+      <View style={styles.screen}>
+        {activityHeader}
+        <View style={styles.centered}>
+          <Ionicons name="alert-circle-outline" size={48} color={COLORS.iconMuted} />
+          <Text style={styles.errorTitle}>{error || 'Quiz not available'}</Text>
+          <AppButton
+            label="Back"
+            onPress={goHome}
+            style={{ marginTop: SPACING[4], minWidth: 160 }}
+          />
+        </View>
       </View>
     );
   }
@@ -585,11 +664,13 @@ export default function AudienceQuizScreen() {
     const displayScore = resultScore?.correctAnswers ?? 0;
     const displayTotal = resultScore?.totalQuestions ?? 0;
     const displayPercentage = Math.round(resultScore?.percentage ?? 0);
-    const showFinalScore = quiz?.launchSettings?.showFinalScore !== false;
+    const showFinalScore =
+      !guestBlockedOnDevice && quiz?.launchSettings?.showFinalScore !== false;
     const countdownWidth = `${(redirectCountdown / 10) * 100}%`;
 
     return (
       <View style={styles.resultScreen}>
+        {activityHeader}
         <ScrollView
           contentContainerStyle={styles.resultScroll}
           keyboardShouldPersistTaps="handled">
@@ -632,24 +713,31 @@ export default function AudienceQuizScreen() {
               </View>
             ) : null}
 
-            <Text style={styles.redirectText}>
-              Redirecting to homepage in{' '}
-              <Text style={styles.redirectSecs}>{redirectCountdown}</Text> seconds...
-            </Text>
-            <View style={styles.redirectTrack}>
-              <View style={[styles.redirectFill, { width: countdownWidth }]} />
-            </View>
+            {!guestBlockedOnDevice ? (
+              <>
+                <Text style={styles.redirectText}>
+                  Redirecting to homepage in{' '}
+                  <Text style={styles.redirectSecs}>{redirectCountdown}</Text> seconds...
+                </Text>
+                <View style={styles.redirectTrack}>
+                  <View style={[styles.redirectFill, { width: countdownWidth }]} />
+                </View>
+              </>
+            ) : null}
 
-            <AppButton label="Go to Home" onPress={leaveHomeOnce} />
+            <AppButton
+              label={leaveHomeLabel || ' '}
+              loading={!leaveHomeLabel}
+              disabled={!leaveHomeLabel}
+              onPress={leaveHomeOnce}
+              accessibilityLabel={leaveHomeLabel || 'Loading'}
+            />
           </View>
         </ScrollView>
       </View>
     );
   }
 
-  const hostLabel = String(
-    quiz.createdByName || quiz.hostName || quiz.teacherName || session?.studentName || 'Audience'
-  ).trim();
   const optionLabels: string[] =
     effectiveType === 'True / False'
       ? ['True', 'False']
@@ -657,22 +745,12 @@ export default function AudienceQuizScreen() {
   const canSubmit = hasAnyAnswer() && !isSubmitting;
 
   return (
-    <KeyboardSafeScreen
-      style={styles.screen}
-      contentContainerStyle={[styles.content, { paddingBottom: SPACING[16] + KEYBOARD_BOTTOM_GAP }]}>
-      <GuestProgressLoginBanner visible={isGuest} />
-
-      <View style={styles.metaLine}>
-        <Text style={styles.metaTitle} numberOfLines={2}>
-          {quiz.title}
-        </Text>
-        <View style={styles.typePill}>
-          <Text style={styles.typePillText}>{quiz.type || 'Quiz'}</Text>
-        </View>
-        <Text style={styles.metaHost} numberOfLines={1}>
-          {hostLabel}
-        </Text>
-      </View>
+    <View style={styles.screen}>
+      {activityHeader}
+      <KeyboardSafeScreen
+        style={styles.screen}
+        contentContainerStyle={[styles.content, { paddingBottom: SPACING[16] + KEYBOARD_BOTTOM_GAP }]}>
+      <GuestProgressLoginBanner visible={isGuest} oneLine />
 
       {timeLeft != null ? (
         <View style={styles.timerRow}>
@@ -767,6 +845,7 @@ export default function AudienceQuizScreen() {
         />
       </View>
     </KeyboardSafeScreen>
+    </View>
   );
 }
 
@@ -780,30 +859,29 @@ const styles = StyleSheet.create({
     padding: SPACING[6],
   },
   content: { padding: SPACING[4], gap: SPACING[3], paddingBottom: SPACING[16] },
-  metaLine: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    gap: SPACING[2],
-  },
-  metaTitle: {
-    flexShrink: 1,
-    fontSize: 15,
+  navBrand: {
     fontWeight: FONT_WEIGHTS.semibold,
-    color: COLORS.text,
+    color: COLORS.header,
+    fontSize: 17,
   },
-  typePill: {
-    backgroundColor: COLORS.blush,
-    borderRadius: 20,
-    paddingHorizontal: SPACING[2],
-    paddingVertical: 2,
+  navTitle: {
+    width: '100%',
+    fontSize: 14,
+    lineHeight: 18,
+    height: 36,
+    fontWeight: FONT_WEIGHTS.semibold,
+    color: COLORS.header,
+    textAlign: 'center',
+    writingDirection: 'auto',
   },
-  typePillText: {
-    fontSize: 11,
-    fontWeight: FONT_WEIGHTS.medium,
-    color: COLORS.primary,
+  navGuestName: {
+    fontSize: 13,
+    fontWeight: FONT_WEIGHTS.regular,
+    color: COLORS.header,
+    textAlign: 'right',
+    maxWidth: '100%',
+    writingDirection: 'auto',
   },
-  metaHost: { fontSize: 13, color: COLORS.darkTextSecondary },
   card: {
     backgroundColor: COLORS.white,
     borderRadius: 16,
@@ -816,7 +894,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    marginTop: SPACING[3],
     backgroundColor: COLORS.blush,
     borderRadius: RADIUS.md,
     paddingHorizontal: SPACING[3],

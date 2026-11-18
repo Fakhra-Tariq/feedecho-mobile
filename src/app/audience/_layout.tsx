@@ -6,7 +6,13 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StudentAccountButton } from '@/components/HostProfileButton';
 import { COLORS, FONT_WEIGHTS } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
-import { isAudienceActivityPath, isCodeJoinGuest, isGuestSessionSync } from '@/lib/guestSession';
+import {
+  isAudienceActivityPath,
+  isAudienceJoinPath,
+  isBannerJoinStackActive,
+  isCodeJoinGuest,
+  isGuestSessionSync,
+} from '@/lib/guestSession';
 import {
   getLastAppliedJoinHref,
   hrefToRouterTarget,
@@ -25,6 +31,8 @@ function usePendingJoinSafetyNet(enabled: boolean, isGuest: boolean) {
     if (!enabled) return;
     let cancelled = false;
     (async () => {
+      // Guest "Log in" banner pushes Join Session. Do not yank back to the activity.
+      if (isAudienceJoinPath(pathname) || isBannerJoinStackActive()) return;
       // One-shot pending href only. lastAppliedJoinHref is guest recovery —
       // using it for logged-in students re-opens Live Chat after they leave Home.
       const href =
@@ -57,6 +65,7 @@ export default function AudienceLayout() {
     firebaseUid: user?.uid,
   });
   const onActivity = isAudienceActivityPath(pathname);
+  const onJoin = isAudienceJoinPath(pathname);
   const insets = useSafeAreaInsets();
   const androidHeaderStatusBarHeight =
     Platform.OS === 'android' ? Math.max(insets.top, StatusBar.currentHeight ?? 0) : undefined;
@@ -65,7 +74,7 @@ export default function AudienceLayout() {
     isGuest
   );
 
-  if (loading && !onActivity) {
+  if (loading && !onActivity && !onJoin) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator color={COLORS.primary} />
@@ -73,14 +82,14 @@ export default function AudienceLayout() {
     );
   }
 
-  if (isHost && !onActivity) {
+  if (isHost && !onActivity && !onJoin) {
     console.log('[TEMP DEBUG] audience layout redirect', { from: pathname, to: '/host', user: user?.uid || null, role: profile?.role, portal, loading, isGuest });
     return <Redirect href={'/host' as Href} />;
   }
 
   // Guests must stay on Live Chat / Quiz / Race / Ticket even if auth briefly
   // reports portal=null (onAuthStateChanged racing the join). Never bounce `/`.
-  if (!onActivity && !isStudent && !isGuest) {
+  if (!onActivity && !onJoin && !isStudent && !isGuest) {
     console.log('[TEMP DEBUG] audience layout redirect', { from: pathname, to: '/', user: user?.uid || null, role: profile?.role, portal, loading, isGuest });
     return <Redirect href={'/' as Href} />;
   }

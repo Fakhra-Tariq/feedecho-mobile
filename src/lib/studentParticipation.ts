@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { apiRequest } from '@/lib/api';
 import { hasLocalQuizSubmission, readLocalQuizSubmissions } from '@/lib/audienceQuizSession';
-import { getExitTicketByCode } from '@/lib/hostExitTickets';
+import { normalizeGuestName as normalizeGuestNameShared } from '@/lib/guestAttemptIdentity';
 import { getStudentActivity, studentQueryFromProfile } from '@/lib/studentsActivity';
 
 /** Local-only markers. No answers. Same-device backup for GET /students/activity. */
@@ -203,12 +203,26 @@ export const GUEST_QUIZ_ALREADY_ATTEMPTED = 'You have already attempted this qui
 export const GUEST_EXIT_TICKET_ALREADY_SUBMITTED =
   'You have already submitted this exit ticket.';
 
-/** Trim, collapse repeated spaces, lowercase — "Ali", " ali ", "ALI" are the same. */
+/** Same algorithm as the website / server guest name normalizer. */
 export function normalizeGuestName(name: string) {
-  return String(name || '')
-    .trim()
-    .replace(/\s+/g, ' ')
-    .toLowerCase();
+  return normalizeGuestNameShared(name);
+}
+
+export async function rememberExitTicketAttempt(ticketId: string, attemptId?: string | null) {
+  const id = String(ticketId || '').trim();
+  const attempt = String(attemptId || '').trim();
+  if (!id || !attempt) return;
+  try {
+    const map = await readJsonMap(EXIT_PARTICIPATION_KEY);
+    const existing = map[id];
+    map[id] = {
+      ...(existing && typeof existing === 'object' ? existing : {}),
+      attemptId: attempt,
+    };
+    await writeJsonMap(EXIT_PARTICIPATION_KEY, map);
+  } catch {
+    // ignore
+  }
 }
 
 export async function markGuestExitTicketSubmitted(ticketId: string, name: string) {
@@ -242,8 +256,8 @@ async function guestNameSubmittedLocally(
 }
 
 /**
- * Guest same-name resubmit check. Uses GET /students/activity (name, no uid)
- * so it can work across devices. Local name markers are a same-device backup.
+ * Same-device local marker only. Cross-device / same-name blocking is the
+ * server (deviceId + normalizedName). Do not query GET /students/activity by name.
  */
 export async function hasGuestSubmitted(
   activityType: 'exitTicket' | 'quiz',
@@ -253,64 +267,10 @@ export async function hasGuestSubmitted(
   const id = String(activityId || '').trim();
   const normalized = normalizeGuestName(name);
   if (!id || !normalized) return false;
-
-  if (await guestNameSubmittedLocally(activityType, id, normalized)) return true;
-
-  const trimmed = String(name || '').trim();
-  const items = await getStudentActivity({
-    name: trimmed,
-    username: trimmed,
-    aliases: [trimmed.toLowerCase(), normalized].filter(Boolean).join(','),
-    limit: 200,
-  });
-  if (activityType === 'exitTicket') {
-    return items.some(
-      (item) =>
-        String(item.type || '') === 'exitTicket' && String(item.ticketId || '') === id
-    );
-  }
-  return items.some(
-    (item) => String(item.type || '') === 'quiz' && String(item.quizId || '') === id
-  );
+  return guestNameSubmittedLocally(activityType, id, normalized);
 }
 
-/**
- * Resolve whether a guest should stay on Join Session.
- * Skips Space Race and Live Chat. Throws on network errors from the check.
- */
-export async function guestJoinBlockReason(name: string, code: string): Promise<string | null> {
-  const trimmedCode = String(code || '')
-    .trim()
-    .toUpperCase();
-  if (!normalizeGuestName(name) || trimmedCode.length !== 6) return null;
-
-  try {
-    const lookup = await apiRequest<{
-      success?: boolean;
-      type?: string;
-      data?: { id?: string };
-    }>(`/sessions/code/${encodeURIComponent(trimmedCode)}`, { auth: false });
-    if (lookup?.type === 'spaceRace') return null;
-    if (lookup?.type === 'quiz') {
-      const quizId = String(lookup?.data?.id || '').trim();
-      if (quizId && (await hasGuestSubmitted('quiz', quizId, name))) {
-        return GUEST_QUIZ_ALREADY_ATTEMPTED;
-      }
-      return null;
-    }
-  } catch {
-    // Not a quiz/space-race code (or lookup failed) — try exit ticket next.
-  }
-
-  try {
-    const ticket = await getExitTicketByCode(trimmedCode);
-    if (ticket?.success && ticket.data?.id) {
-      if (await hasGuestSubmitted('exitTicket', ticket.data.id, name)) {
-        return GUEST_EXIT_TICKET_ALREADY_SUBMITTED;
-      }
-    }
-  } catch {
-    // Live chat / invalid code / lookup error — join path handles it.
-  }
+/** Server 409 is the source of truth; keep this for call-site compatibility. */
+export async function guestJoinBlockReason(_name: string, _code: string): Promise<string | null> {
   return null;
 }

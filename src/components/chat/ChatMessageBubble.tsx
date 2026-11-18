@@ -1,5 +1,7 @@
+import { memo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
+import { ChatResourceCard } from '@/components/chat/ChatResourceCard';
 import { COLORS, FONT_WEIGHTS, SPACING } from '@/constants/theme';
 import type { ChatMessage } from '@/lib/anonymousChat';
 
@@ -15,37 +17,76 @@ export function formatChatMessageTime(timestamp?: string) {
   return `${hour12}:${minutes} ${period}`;
 }
 
+function writingDirectionFor(label: string): 'ltr' | 'rtl' | undefined {
+  const first = String(label || '').match(/[^\s]/)?.[0];
+  if (!first) return undefined;
+  return /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFC]/.test(first) ? 'rtl' : 'ltr';
+}
+
 type Props = {
   message: ChatMessage;
   isOwn: boolean;
   label: string;
   showStudentDot?: boolean;
+  namedSender?: boolean;
+  isGuest?: boolean;
+  onDownloadResource?: (message: ChatMessage) => Promise<void> | void;
 };
 
-export function ChatMessageBubble({ message, isOwn, label, showStudentDot = false }: Props) {
+function ChatMessageBubbleInner({
+  message,
+  isOwn,
+  label,
+  showStudentDot = false,
+  namedSender = false,
+  isGuest = false,
+  onDownloadResource,
+}: Props) {
   const text = message?.content || message?.message || '';
   const isHidden = Boolean(message?.isHidden);
   const isAnswered = Boolean(message?.isAnswered);
+  const isResource = message?.type === 'resource';
 
   return (
     <View style={[styles.row, isOwn ? styles.rowEnd : styles.rowStart]}>
       <View style={styles.bubbleWrap}>
-        <View style={[styles.labelRow, isOwn ? styles.rowEnd : styles.rowStart]}>
-          {showStudentDot ? <View style={styles.dot} /> : null}
-          <Text style={styles.label}>{label}</Text>
-        </View>
-
         <View
           style={[
-            styles.bubble,
-            isOwn ? styles.bubbleOwn : styles.bubbleOther,
-            !isOwn && isHidden && styles.bubbleHidden,
-            !isOwn && isAnswered && styles.bubbleAnswered,
+            styles.labelRow,
+            isOwn ? styles.rowEnd : styles.rowStart,
           ]}>
-          <Text style={[styles.text, isOwn && styles.textOwn, isHidden && styles.textHidden]}>
-            {text}
+          {showStudentDot ? <View style={styles.dot} /> : null}
+          <Text
+            style={[
+              styles.label,
+              namedSender && styles.labelNamed,
+              { writingDirection: writingDirectionFor(label) },
+            ]}
+            numberOfLines={1}
+            ellipsizeMode="tail">
+            {label}
           </Text>
         </View>
+
+        {isResource ? (
+          <ChatResourceCard
+            message={message}
+            onDownload={onDownloadResource}
+            isGuest={isGuest}
+          />
+        ) : (
+          <View
+            style={[
+              styles.bubble,
+              isOwn ? styles.bubbleOwn : styles.bubbleOther,
+              !isOwn && isHidden && styles.bubbleHidden,
+              !isOwn && isAnswered && styles.bubbleAnswered,
+            ]}>
+            <Text style={[styles.text, isOwn && styles.textOwn, isHidden && styles.textHidden]}>
+              {text}
+            </Text>
+          </View>
+        )}
 
         <View style={[styles.metaRow, isOwn ? styles.rowEnd : styles.rowStart]}>
           <Text style={styles.time}>{formatChatMessageTime(message?.timestamp)}</Text>
@@ -56,19 +97,40 @@ export function ChatMessageBubble({ message, isOwn, label, showStudentDot = fals
   );
 }
 
+export const ChatMessageBubble = memo(ChatMessageBubbleInner);
+
 const styles = StyleSheet.create({
   row: { flexDirection: 'row', marginBottom: SPACING[3] },
   rowStart: { justifyContent: 'flex-start' },
   rowEnd: { justifyContent: 'flex-end' },
-  bubbleWrap: { maxWidth: '80%' },
-  labelRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
+  bubbleWrap: { maxWidth: '80%', minWidth: 0 },
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
+    maxWidth: '100%',
+    minWidth: 0,
+  },
   dot: {
     width: 8,
     height: 8,
     borderRadius: 4,
     backgroundColor: COLORS.mutedPurple,
+    flexShrink: 0,
   },
-  label: { fontSize: 11, fontWeight: FONT_WEIGHTS.medium, color: COLORS.darkTextSecondary },
+  label: {
+    flexShrink: 1,
+    minWidth: 0,
+    maxWidth: '100%',
+    fontSize: 11,
+    fontWeight: FONT_WEIGHTS.medium,
+    color: COLORS.darkTextSecondary,
+  },
+  labelNamed: {
+    color: '#6B3A5C',
+    fontWeight: FONT_WEIGHTS.medium,
+  },
   bubble: {
     paddingHorizontal: SPACING[4],
     paddingVertical: 10,

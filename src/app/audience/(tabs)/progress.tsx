@@ -115,7 +115,7 @@ function quizScorePercent(item: ActivityItem) {
 
 export default function AudienceProgressScreen() {
   const insets = useSafeAreaInsets();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const { items: activityItems, loading, error, hideActivity } = useStudentActivity(200);
   const items = activityItems.filter(
     (item) => item.type !== 'liveChat' && item.type !== 'anonymousChat'
@@ -128,6 +128,11 @@ export default function AudienceProgressScreen() {
   const shownModal = getActivityDisplayTimes(viewItem);
   const stackButtons = width < 380;
   const listPadBottom = TAB_BAR_CONTENT_HEIGHT + insets.bottom + 16;
+  const overlayPadTop = Math.max(16, insets.top);
+  const overlayPadBottom = Math.max(16, insets.bottom);
+  const modalMaxH = Math.round(height * 0.85);
+  const scrollMaxHeight = Math.max(180, modalMaxH - 52 - 40);
+  const scrollPadBottom = Math.max(24, insets.bottom) + 12;
 
   const onConfirmDelete = async () => {
     if (!deleteItem) return;
@@ -235,8 +240,18 @@ export default function AudienceProgressScreen() {
         transparent
         animationType="fade"
         onRequestClose={() => setViewItem(null)}>
-        <Pressable style={styles.overlay} onPress={() => setViewItem(null)}>
-          <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
+        <View
+          style={[
+            styles.overlay,
+            { paddingTop: overlayPadTop, paddingBottom: overlayPadBottom },
+          ]}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => setViewItem(null)}
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+          />
+          <View style={[styles.modalCard, { maxHeight: modalMaxH }]} accessibilityViewIsModal>
             <View style={styles.modalHead}>
               <Text style={styles.modalTitle}>
                 {viewItem?.type === 'quiz'
@@ -252,7 +267,13 @@ export default function AudienceProgressScreen() {
                 <Ionicons name="close" size={20} color="#9CA3AF" />
               </Pressable>
             </View>
-            <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
+            <ScrollView
+              style={[styles.modalScroll, { maxHeight: scrollMaxHeight }]}
+              contentContainerStyle={{ paddingBottom: scrollPadBottom }}
+              showsVerticalScrollIndicator
+              nestedScrollEnabled
+              keyboardShouldPersistTaps="handled"
+              bounces>
               {viewItem?.type === 'exitTicket' ? (
                 <Text style={styles.modalHeading}>
                   {resolveExitTicketActivityTitle(viewItem, exitTicketTitles)}
@@ -260,14 +281,14 @@ export default function AudienceProgressScreen() {
               ) : cleanText(viewItem?.title) ? (
                 <Text style={styles.modalHeading}>{cleanText(viewItem?.title)}</Text>
               ) : null}
-              {cleanText(shownModal.date) ? (
-                <Text style={styles.modalMeta}>Date: {shownModal.date}</Text>
-              ) : null}
-              {cleanText(shownModal.time) ? (
-                <Text style={styles.modalMeta}>Time: {shownModal.time}</Text>
-              ) : null}
               {viewItem?.type === 'quiz' ? (
                 <>
+                  {cleanText(shownModal.date) ? (
+                    <Text style={styles.modalMeta}>Date: {shownModal.date}</Text>
+                  ) : null}
+                  {cleanText(shownModal.time) ? (
+                    <Text style={styles.modalMeta}>Time: {shownModal.time}</Text>
+                  ) : null}
                   {quizScorePercent(viewItem) ? (
                     <Text style={styles.modalMeta}>Score: {quizScorePercent(viewItem)}%</Text>
                   ) : null}
@@ -319,7 +340,9 @@ export default function AudienceProgressScreen() {
                               size={16}
                               color={isCorrect ? '#16A34A' : '#DC2626'}
                             />
-                            <Text style={styles.modalMeta}>{studentAnswer}</Text>
+                            <Text style={[styles.modalMeta, styles.breakdownAnsText]}>
+                              {studentAnswer}
+                            </Text>
                           </View>
                         </View>
                       );
@@ -330,8 +353,7 @@ export default function AudienceProgressScreen() {
                     </Text>
                   )}
                 </>
-              ) : null}
-              {viewItem?.type === 'spaceRace' ? (
+              ) : viewItem?.type === 'spaceRace' ? (
                 <>
                   {cleanText(viewItem.rank || viewItem.subtitle) ? (
                     <Text style={styles.modalMeta}>
@@ -341,14 +363,14 @@ export default function AudienceProgressScreen() {
                   {cleanText(viewItem.score) ? (
                     <Text style={styles.modalMeta}>Score: {cleanText(viewItem.score)}</Text>
                   ) : null}
-                  {cleanText(shownModal.joinedDate) && cleanText(shownModal.joinedTime) ? (
+                  {cleanText(shownModal.joinedDate) || cleanText(shownModal.joinedTime) ? (
                     <Text style={styles.modalMeta}>
-                      Joined: {shownModal.joinedDate} · {shownModal.joinedTime}
+                      Joined: {cleanText(shownModal.joinedDate) || '—'} ·{' '}
+                      {cleanText(shownModal.joinedTime) || '—'}
                     </Text>
                   ) : null}
                 </>
-              ) : null}
-              {viewItem?.type === 'exitTicket' ? (
+              ) : viewItem?.type === 'exitTicket' ? (
                 <>
                   <Text style={styles.modalMeta}>Submitted exit ticket</Text>
                   {cleanText(shownModal.date) && cleanText(shownModal.time) ? (
@@ -359,8 +381,8 @@ export default function AudienceProgressScreen() {
                 </>
               ) : null}
             </ScrollView>
-          </Pressable>
-        </Pressable>
+          </View>
+        </View>
       </Modal>
 
       <ConfirmModal
@@ -468,7 +490,7 @@ const styles = StyleSheet.create({
     maxWidth: 420,
     maxHeight: '85%',
   },
-  modalScroll: { maxHeight: 520 },
+  modalScroll: { flexGrow: 0, flexShrink: 1 },
   statsBox: {
     marginTop: 8,
     marginBottom: 8,
@@ -500,7 +522,8 @@ const styles = StyleSheet.create({
     color: '#2B1F27',
     marginBottom: 4,
   },
-  breakdownAns: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  breakdownAns: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  breakdownAnsText: { flex: 1, flexShrink: 1 },
   modalHead: {
     flexDirection: 'row',
     alignItems: 'center',

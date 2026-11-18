@@ -24,9 +24,11 @@ import {
 import { COLORS, FONT_WEIGHTS, SHADOWS, SPACING } from '@/constants/theme';
 import { useHostSessions } from '@/context/HostSessionContext';
 import {
+  blockMobileLaunchIfBusy,
   cleanErrorMessage,
   showLaunchFailureAlert,
 } from '@/lib/activeActivity';
+import { ANOTHER_ACTIVITY_LIVE_HINT, liveActivityBlocksLaunch } from '@/lib/liveHostActivity';
 import {
   buildTicketPayload,
   createExitTicket,
@@ -56,7 +58,8 @@ export default function CreateExitTicketScreen() {
   const insets = useSafeAreaInsets();
   const { edit } = useLocalSearchParams<{ edit?: string }>();
   const editTicketId = edit ? String(edit) : null;
-  const { activeSession } = useHostSessions();
+  const { activeSession, liveActivity } = useHostSessions();
+  const ticketLaunchBlocked = liveActivityBlocksLaunch(liveActivity);
 
   const [step, setStep] = useState(1);
   const [isLoadingDraft, setIsLoadingDraft] = useState(Boolean(editTicketId));
@@ -223,6 +226,7 @@ export default function CreateExitTicketScreen() {
       });
       return;
     }
+    if (blockMobileLaunchIfBusy(liveActivity, { type: 'exitticket' })) return;
 
     setSaving(true);
     try {
@@ -579,21 +583,28 @@ export default function CreateExitTicketScreen() {
 
             <Pressable
               onPress={onLaunch}
-              disabled={saving || !isFormValid}
+              disabled={saving || !isFormValid || ticketLaunchBlocked}
               style={({ pressed }) => [
                 styles.primaryBtn,
                 { marginTop: 10 },
-                (saving || !isFormValid) && styles.primaryBtnDisabled,
-                !(saving || !isFormValid) && pressed && styles.primaryBtnPressed,
+                (saving || !isFormValid || ticketLaunchBlocked) && styles.primaryBtnDisabled,
+                !(saving || !isFormValid || ticketLaunchBlocked) && pressed && styles.primaryBtnPressed,
               ]}
               accessibilityRole="button"
-              accessibilityLabel="Launch Exit Ticket"
-              accessibilityState={{ disabled: saving || !isFormValid }}>
+              accessibilityLabel={
+                ticketLaunchBlocked
+                  ? 'Launch Exit Ticket, another activity is live'
+                  : 'Launch Exit Ticket'
+              }
+              accessibilityState={{ disabled: saving || !isFormValid || ticketLaunchBlocked }}>
               <Text style={styles.primaryBtnLabel}>
                 {saving ? 'Launching…' : 'Launch Exit Ticket'}
               </Text>
               {!saving ? <Ionicons name="play-outline" size={18} color={COLORS.white} /> : null}
             </Pressable>
+            {ticketLaunchBlocked ? (
+              <Text style={styles.launchHint}>{ANOTHER_ACTIVITY_LIVE_HINT}</Text>
+            ) : null}
           </View>
         ) : null}
       </ScrollView>
@@ -772,6 +783,12 @@ const styles = StyleSheet.create({
   },
   primaryBtnPressed: { backgroundColor: PLUM_PRESSED },
   primaryBtnDisabled: { backgroundColor: PLUM_DISABLED },
+  launchHint: {
+    marginTop: 8,
+    fontSize: 12,
+    color: '#6B7280',
+    textAlign: 'center',
+  },
   primaryBtnLabel: {
     color: COLORS.white,
     fontSize: 15,

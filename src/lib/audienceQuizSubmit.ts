@@ -82,9 +82,15 @@ export async function submitQuizWithRetry(
         ? lastError.message
         : 'Submission failed';
 
+  const alreadyAttempted =
+    (lastError instanceof ApiError &&
+      (lastError.data as { code?: string } | null)?.code === 'ALREADY_ATTEMPTED') ||
+    /already completed this quiz/i.test(String(serverMsg));
+
   return {
     success: false as const,
-    error: serverMsg,
+    alreadyAttempted,
+    error: alreadyAttempted ? 'You have already completed this quiz' : serverMsg,
     status: lastError instanceof ApiError ? lastError.status : null,
   };
 }

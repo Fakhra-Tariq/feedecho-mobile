@@ -49,3 +49,20 @@ export function isAudienceActivityPath(pathname: string | null | undefined) {
     path.includes('/audience/exit-ticket')
   );
 }
+
+/** Audience or public Join Session route (Expo pathname may omit `/audience`). */
+export function isAudienceJoinPath(pathname: string | null | undefined) {
+  const path = String(pathname || '').split('?')[0].replace(/\/+$/, '');
+  return path === '/join' || path === '/audience/join' || path.endsWith('/join');
+}
+
+/** While the guest banner has Join Session on the stack, do not yank back to the activity. */
+let bannerJoinStackActive = false;
+
+export function setBannerJoinStackActive(active: boolean) {
+  bannerJoinStackActive = active;
+}
+
+export function isBannerJoinStackActive() {
+  return bannerJoinStackActive;
+}

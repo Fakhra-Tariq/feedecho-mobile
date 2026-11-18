@@ -49,7 +49,10 @@ export function TabBarLabel({ focused, children }: { focused: boolean; children:
   return (
     <Text
       style={[styles.label, focused ? styles.labelOn : styles.labelOff]}
-      numberOfLines={1}>
+      numberOfLines={1}
+      maxFontSizeMultiplier={1.1}
+      adjustsFontSizeToFit
+      minimumFontScale={0.8}>
       {children}
     </Text>
   );
@@ -57,15 +60,17 @@ export function TabBarLabel({ focused, children }: { focused: boolean; children:
 
 const styles = StyleSheet.create({
   pill: {
-    width: 52,
-    height: 30,
-    borderRadius: 15,
+    width: 36,
+    height: 28,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
   },
   label: {
-    fontSize: 11,
+    fontSize: 10,
+    lineHeight: 12,
     marginTop: 2,
+    textAlign: 'center',
   },
   labelOn: {
     color: COLORS.plumInk,

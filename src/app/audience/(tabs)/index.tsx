@@ -31,7 +31,10 @@ import {
   activityHomeTitle,
   type ActivityItem,
 } from '@/lib/studentsActivity';
-import { useExitTicketActivityTitles } from '@/lib/useExitTicketActivityTitles';
+import {
+  resolveExitTicketActivityTitle,
+  useExitTicketActivityTitles,
+} from '@/lib/useExitTicketActivityTitles';
 import { useStudentActivity } from '@/lib/useStudentActivity';
 
 export default function AudienceHomeScreen() {
@@ -81,7 +84,9 @@ export default function AudienceHomeScreen() {
         }
 
         if (!result.success) {
-          setJoinError(result.error || 'Failed to join session. Please try again.');
+          const fail = result.error || 'Failed to join session. Please try again.';
+          if (/already been used on this device/i.test(fail)) return;
+          setJoinError(fail);
           return;
         }
 
@@ -255,7 +260,10 @@ export default function AudienceHomeScreen() {
           <Text style={styles.empty}>No recent activity yet. Join a session to get started!</Text>
         ) : (
           recent.map((item, index) => {
-            const title = activityHomeTitle(item, exitTicketTitles);
+            const title =
+              item.type === 'exitTicket'
+                ? resolveExitTicketActivityTitle(item, exitTicketTitles)
+                : activityHomeTitle(item, exitTicketTitles);
             const subtitle = activityHomeSubtitle(item);
             const dateLabel = activityShortDate(item);
             if (!title) return null;
@@ -280,7 +288,7 @@ export default function AudienceHomeScreen() {
                   />
                 </View>
                 <View style={styles.activityCopy}>
-                  <Text style={styles.activityTitle} numberOfLines={2}>
+                  <Text style={styles.activityTitle} numberOfLines={1}>
                     {title}
                   </Text>
                   {subtitle ? <Text style={styles.activityMeta}>{subtitle}</Text> : null}
@@ -407,9 +415,17 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: FONT_WEIGHTS.medium,
     color: '#2B1F27',
+    flexShrink: 1,
   },
   activityMeta: { fontSize: 12, color: '#5F5460', marginTop: 2 },
-  activityDate: { fontSize: 12, color: '#8A7F89', flexShrink: 0 },
+  activityDate: {
+    fontSize: 12,
+    color: '#8A7F89',
+    flexShrink: 0,
+    marginTop: 2,
+    maxWidth: '34%',
+    textAlign: 'right',
+  },
   seeAll: {
     marginTop: SPACING[3],
     flexDirection: 'row',

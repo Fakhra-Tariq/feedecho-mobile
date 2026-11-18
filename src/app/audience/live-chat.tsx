@@ -8,7 +8,6 @@ import {
   FlatList,
   Keyboard,
   Platform,
-  Pressable,
   StyleSheet,
   Text,
   TextInput,
@@ -17,6 +16,8 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { AudienceActivityHeader } from '@/components/Audience/AudienceActivityHeader';
+import { GuestProgressLoginBanner } from '@/components/Audience/GuestProgressLoginBanner';
 import { ChatMessageBubble } from '@/components/chat/ChatMessageBubble';
 import { showAlert } from '@/components/feedback';
 import {
@@ -32,12 +33,15 @@ import { cleanErrorMessage } from '@/lib/activeActivity';
 import { useLeaveActivity } from '@/lib/audienceHomeNavigation';
 import {
   addChatMessage,
-  chatParticipantStorageKey,
+  audienceMessageLabel,
   chatPresence,
   getChatByCode,
-  getOrCreateChatParticipantId,
+  isChatNamesVisible,
   isChatSessionEnded,
+  isNamedAudienceMessage,
   leaveChat,
+  readLegacyChatParticipantId,
+  resolveChatParticipantId,
   type ChatJoinIdentity,
 } from '@/lib/anonymousChat';
 import { recordLiveChatActivityJoin } from '@/lib/liveChatActivity';
@@ -48,18 +52,9 @@ import { useRtdbList, useRtdbValue } from '@/lib/useRtdb';
 const SESSION_CODE_KEY = 'sessionCode';
 const STUDENT_NAME_KEY = 'studentName';
 
-async function resolveParticipantId(code: string, identity: ChatJoinIdentity) {
-  const key = chatParticipantStorageKey(code, identity);
-  if (!key) return getOrCreateChatParticipantId();
-  const existing = await AsyncStorage.getItem(key);
-  if (existing) return existing;
-  const next = getOrCreateChatParticipantId();
-  await AsyncStorage.setItem(key, next);
-  return next;
-}
 
 export default function AudienceLiveChatScreen() {
-  const { profile } = useAuth();
+  const { profile, user } = useAuth();
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ code?: string }>();
@@ -70,6 +65,7 @@ export default function AudienceLiveChatScreen() {
   const [sessionCode, setSessionCode] = useState('');
   const [chatId, setChatId] = useState<string | null>(null);
   const [participantId, setParticipantId] = useState('');
+  const [legacyParticipantId, setLegacyParticipantId] = useState('');
   const [joinError, setJoinError] = useState('');
   const [isJoining, setIsJoining] = useState(false);
   const [message, setMessage] = useState('');
@@ -119,55 +115,22 @@ export default function AudienceLiveChatScreen() {
     showActiveChat && chatSession?.title ? String(chatSession.title) : '';
   const joinDisplayName = (profile?.name || '').trim() || storedGuestName.trim();
   const guestDisplayName = joinDisplayName || 'Audience';
-  const loggedInUid = profile?.guest ? '' : String(profile?.uid || '').trim();
+  const loggedInUid = profile?.guest
+    ? ''
+    : String(user?.uid || profile?.uid || '').trim();
   const chatJoinIdentity: ChatJoinIdentity = {
     uid: loggedInUid || null,
     name: joinDisplayName,
   };
 
   useLayoutEffect(() => {
-    if (isGuest) {
-      navigation.setOptions({
-        headerShown: false,
-        headerRight: () => null,
-      });
-      return;
-    }
     navigation.setOptions({
-      headerShown: true,
-      headerTitleAlign: 'center',
-      headerLeftContainerStyle: { flexShrink: 0 },
-      headerRightContainerStyle: { flexShrink: 0 },
-      headerTitleContainerStyle: { flex: 1, maxWidth: '48%', alignItems: 'center' },
-      headerLeft: () => (
-        <View style={styles.studentNavLeft}>
-          <Pressable
-            onPress={leave}
-            accessibilityRole="button"
-            accessibilityLabel="Back"
-            hitSlop={8}
-            style={styles.studentNavBack}>
-            <Ionicons name="arrow-back" size={24} color={COLORS.header} />
-          </Pressable>
-          <Text style={styles.studentNavBrand} numberOfLines={1}>
-            Live Chat
-          </Text>
-        </View>
-      ),
-      headerTitle: () =>
-        chatTitle ? (
-          <View style={styles.studentNavCenter}>
-            <Ionicons name="chatbubble-outline" size={16} color="#6B3A5C" />
-            <Text style={styles.studentNavTitle} numberOfLines={1}>
-              {chatTitle}
-            </Text>
-          </View>
-        ) : (
-          <View />
-        ),
-      headerRight: () => <StudentAccountButton />,
+      headerShown: false,
+      headerBackVisible: false,
+      headerLeft: () => null,
+      headerRight: () => null,
     });
-  }, [isGuest, navigation, chatTitle, leave]);
+  }, [navigation]);
 
   useEffect(() => {
     if (!isGuest) return;
@@ -214,11 +177,13 @@ export default function AudienceLiveChatScreen() {
       try {
         const storedName = (await AsyncStorage.getItem(STUDENT_NAME_KEY))?.trim() || '';
         const identity: ChatJoinIdentity = {
-          uid: profile?.guest ? null : String(profile?.uid || '').trim() || null,
+          uid: profile?.guest ? null : String(user?.uid || profile?.uid || '').trim() || null,
           name: storedName || (profile?.name || '').trim(),
         };
-        const nextParticipantId = await resolveParticipantId(codeToUse, identity);
+        const nextParticipantId = await resolveChatParticipantId(codeToUse, identity);
         setParticipantId(nextParticipantId);
+        const legacyId = await readLegacyChatParticipantId(codeToUse, identity);
+        setLegacyParticipantId(legacyId);
         setSessionCode(codeToUse);
 
         const response = await getChatByCode(codeToUse, nextParticipantId);
@@ -253,7 +218,7 @@ export default function AudienceLiveChatScreen() {
         setIsJoining(false);
       }
     },
-    [isJoining, normalizedCode, profile?.guest, profile?.uid, profile?.email, profile?.name]
+    [isJoining, normalizedCode, profile?.guest, profile?.uid, profile?.email, profile?.name, user?.uid]
   );
 
   useEffect(() => {
@@ -265,7 +230,8 @@ export default function AudienceLiveChatScreen() {
 
   useEffect(() => {
     if (!normalizedCode) return;
-    resolveParticipantId(normalizedCode, chatJoinIdentity).then(setParticipantId);
+    resolveChatParticipantId(normalizedCode, chatJoinIdentity).then(setParticipantId);
+    readLegacyChatParticipantId(normalizedCode, chatJoinIdentity).then(setLegacyParticipantId);
   }, [normalizedCode, loggedInUid, joinDisplayName]);
 
   useEffect(() => {
@@ -342,10 +308,11 @@ export default function AudienceLiveChatScreen() {
 
   const isOwnStudentMessage = (msg: any) => {
     if (!msg || msg.isTeacher) return false;
-    if (!participantId) return false;
-    if (msg.participantId) {
-      return String(msg.participantId) === String(participantId);
-    }
+    const stored = String(msg.participantId || '');
+    if (!stored) return false;
+    if (loggedInUid && stored === String(loggedInUid)) return true;
+    if (legacyParticipantId && stored === String(legacyParticipantId)) return true;
+    if (participantId && stored === String(participantId)) return true;
     return false;
   };
 
@@ -356,12 +323,25 @@ export default function AudienceLiveChatScreen() {
     setIsSending(true);
     setMessage('');
     try {
-      const pid = participantId || (await resolveParticipantId(normalizedCode, chatJoinIdentity));
-      const response = await addChatMessage(chatSession.id, {
+      const pid = participantId || (await resolveChatParticipantId(normalizedCode, chatJoinIdentity));
+      const namesVisible = isChatNamesVisible(chatSession);
+      const senderName = String(joinDisplayName || '').trim().slice(0, 80);
+      const payload: {
+        message: string;
+        sender: string;
+        participantId: string;
+        showName: boolean;
+        senderName?: string;
+      } = {
         message: trimmed,
         sender: 'Anonymous Audience',
         participantId: pid,
-      });
+        showName: namesVisible,
+      };
+      if (namesVisible && senderName) {
+        payload.senderName = senderName;
+      }
+      const response = await addChatMessage(chatSession.id, payload);
       if (!response.success) {
         showAlert({
           type: 'error',
@@ -388,39 +368,14 @@ export default function AudienceLiveChatScreen() {
 
   return (
     <KeyboardSafeScreen scroll={false} style={styles.screen}>
-      {isGuest ? (
-        <View style={[styles.guestNavSafe, { paddingTop: insets.top }]}>
-          <View style={styles.guestNav}>
-            <Pressable
-              onPress={leave}
-              accessibilityRole="button"
-              accessibilityLabel="Back"
-              hitSlop={8}
-              style={styles.guestNavBack}>
-              <Ionicons name="arrow-back" size={22} color={COLORS.header} />
-            </Pressable>
-            <Text style={styles.guestNavBrand} numberOfLines={1}>
-              Live Chat
-            </Text>
-            <View style={styles.guestNavCenter}>
-              {chatTitle ? (
-                <>
-                  <Ionicons name="chatbubble-outline" size={16} color="#6B3A5C" />
-                  <Text style={styles.guestNavTitle} numberOfLines={1}>
-                    {chatTitle}
-                  </Text>
-                </>
-              ) : null}
-            </View>
-            <View style={styles.guestNavRight} accessibilityRole="text">
-              <Ionicons name="person-outline" size={16} color="#5F5460" />
-              <Text style={styles.guestNavName} numberOfLines={1}>
-                {guestDisplayName}
-              </Text>
-            </View>
-          </View>
-        </View>
-      ) : null}
+      <AudienceActivityHeader
+        activityLabel="Live Chat"
+        title={chatTitle || 'Live Chat'}
+        participantName={guestDisplayName}
+        isLoggedIn={!isGuest}
+        rightSlot={isGuest ? undefined : <StudentAccountButton />}
+      />
+      <GuestProgressLoginBanner visible={isGuest} />
 
       {showJoinForm ? (
         <View
@@ -508,7 +463,8 @@ export default function AudienceLiveChatScreen() {
                 <ChatMessageBubble
                   message={item}
                   isOwn={isOwn}
-                  label={isOwn ? 'You' : fromTeacher ? 'Host' : 'Audience'}
+                  label={isOwn ? 'You' : fromTeacher ? 'Host' : audienceMessageLabel(item)}
+                  namedSender={isNamedAudienceMessage(item, { isOwn, fromTeacher })}
                   showStudentDot={!isOwn && !fromTeacher}
                 />
               );
@@ -548,15 +504,20 @@ const styles = StyleSheet.create({
     borderBottomColor: COLORS.border,
   },
   guestNav: {
-    height: 56,
+    minHeight: 56,
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 16,
-    gap: 8,
   },
-  guestNavBack: {
-    paddingVertical: 8,
-    paddingRight: 4,
+  navSide: {
+    flex: 1,
+    flexBasis: 0,
+    minWidth: 0,
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+  },
+  navSideRight: {
+    alignItems: 'flex-end',
   },
   guestNavBrand: {
     flexShrink: 0,
@@ -565,7 +526,7 @@ const styles = StyleSheet.create({
     fontWeight: FONT_WEIGHTS.semibold,
   },
   guestNavCenter: {
-    flex: 1,
+    flexShrink: 1,
     minWidth: 0,
     flexDirection: 'row',
     alignItems: 'center',
@@ -574,48 +535,24 @@ const styles = StyleSheet.create({
   },
   guestNavTitle: {
     flexShrink: 1,
+    minWidth: 0,
     fontSize: 14,
     fontWeight: FONT_WEIGHTS.semibold,
     color: '#2B1F27',
   },
   guestNavRight: {
-    flexShrink: 0,
-    maxWidth: 110,
+    maxWidth: '100%',
+    minWidth: 0,
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'flex-end',
     gap: 4,
   },
   guestNavName: {
     flexShrink: 1,
+    minWidth: 0,
     fontSize: 13,
     fontWeight: FONT_WEIGHTS.medium,
-    color: '#2B1F27',
-  },
-  studentNavLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  studentNavBack: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  studentNavBrand: {
-    color: COLORS.header,
-    fontSize: 17,
-    fontWeight: FONT_WEIGHTS.semibold,
-  },
-  studentNavCenter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    minWidth: 0,
-    maxWidth: '100%',
-  },
-  studentNavTitle: {
-    flexShrink: 1,
-    fontSize: 14,
-    fontWeight: FONT_WEIGHTS.semibold,
     color: '#2B1F27',
   },
   card: {

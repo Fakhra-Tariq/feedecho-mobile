@@ -15,10 +15,12 @@ import { KeyboardModalFrame } from '@/components/KeyboardSafeScreen';
 import { COLORS, FONT_WEIGHTS, SHADOWS, SPACING } from '@/constants/theme';
 import { useHostSessions } from '@/context/HostSessionContext';
 import {
+  blockMobileLaunchIfBusy,
   cleanErrorMessage,
   isActivityConflictMessage,
   showLaunchFailureAlert,
 } from '@/lib/activeActivity';
+import { ANOTHER_ACTIVITY_LIVE_HINT, liveActivityBlocksLaunch } from '@/lib/liveHostActivity';
 import {
   launchQuiz,
   parseOptionalMinutes,
@@ -46,14 +48,13 @@ export function LaunchQuizSettingsModal({
   onClose,
   onLaunched,
 }: Props) {
-  const { activeSession } = useHostSessions();
+  const { activeSession, liveActivity } = useHostSessions();
   const [timeLimit, setTimeLimit] = useState<number | null>(null);
   const [timePerStudent, setTimePerStudent] = useState<number | null>(null);
   const [liveHint, setLiveHint] = useState(false);
   const [shuffleQuestions, setShuffleQuestions] = useState(false);
   const [shuffleAnswers, setShuffleAnswers] = useState(false);
   const [showFinalScore, setShowFinalScore] = useState(true);
-  const [oneAttempt, setOneAttempt] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -65,7 +66,6 @@ export function LaunchQuizSettingsModal({
     setShuffleQuestions(false);
     setShuffleAnswers(false);
     setShowFinalScore(true);
-    setOneAttempt(false);
     setLaunching(false);
     setError(null);
   }, [visible, quiz?.id]);
@@ -93,6 +93,9 @@ export function LaunchQuizSettingsModal({
       setError('You need an active session before launching a quiz.');
       return;
     }
+    if (blockMobileLaunchIfBusy(liveActivity, { type: 'quiz', id: quiz.id })) {
+      return;
+    }
 
     const now = new Date();
     const quizAvailabilityMinutes = parseOptionalMinutes(timeLimit);
@@ -112,7 +115,6 @@ export function LaunchQuizSettingsModal({
         shuffleQuestions,
         shuffleAnswers,
         showFinalScore,
-        oneAttempt,
         launchedAt: now.toISOString(),
       });
       onLaunched(launched);
@@ -183,23 +185,32 @@ export function LaunchQuizSettingsModal({
                   value={showFinalScore}
                   onChange={setShowFinalScore}
                 />
-                <ToggleRow
-                  label="One attempt only"
-                  badge="PRO"
-                  value={oneAttempt}
-                  onChange={setOneAttempt}
-                />
               </View>
               {error ? <Text style={styles.error}>{error}</Text> : null}
             </ScrollView>
 
             <View style={styles.footer}>
               <TouchableOpacity
-                style={[styles.launch, launching && styles.disabled]}
+                style={[
+                  styles.launch,
+                  (launching || liveActivityBlocksLaunch(liveActivity, { type: 'quiz', id: quiz?.id })) &&
+                    styles.disabled,
+                ]}
                 onPress={handleLaunch}
-                disabled={launching}
+                disabled={
+                  launching || liveActivityBlocksLaunch(liveActivity, { type: 'quiz', id: quiz?.id })
+                }
                 accessibilityRole="button"
-                accessibilityLabel="Launch Quiz">
+                accessibilityLabel={
+                  liveActivityBlocksLaunch(liveActivity, { type: 'quiz', id: quiz?.id })
+                    ? 'Launch Quiz, another activity is live'
+                    : 'Launch Quiz'
+                }
+                accessibilityState={{
+                  disabled:
+                    launching ||
+                    liveActivityBlocksLaunch(liveActivity, { type: 'quiz', id: quiz?.id }),
+                }}>
                 {launching ? (
                   <ActivityIndicator color={COLORS.white} />
                 ) : (
@@ -209,6 +220,9 @@ export function LaunchQuizSettingsModal({
                   </View>
                 )}
               </TouchableOpacity>
+              {liveActivityBlocksLaunch(liveActivity, { type: 'quiz', id: quiz?.id }) ? (
+                <Text style={styles.busyHint}>{ANOTHER_ACTIVITY_LIVE_HINT}</Text>
+              ) : null}
               <TouchableOpacity onPress={onClose} accessibilityRole="button" accessibilityLabel="Cancel">
                 <Text style={styles.cancel}>Cancel</Text>
               </TouchableOpacity>
@@ -318,22 +332,12 @@ function MinuteField({
   );
 }
 
-function ProBadge({ label }: { label: string }) {
-  return (
-    <View style={styles.proBadge} accessibilityLabel={label}>
-      <Text style={styles.proBadgeText}>{label}</Text>
-    </View>
-  );
-}
-
 function ToggleRow({
   label,
-  badge,
   value,
   onChange,
 }: {
   label: string;
-  badge?: string;
   value: boolean;
   onChange: (value: boolean) => void;
 }) {
@@ -341,7 +345,6 @@ function ToggleRow({
     <View style={styles.toggleRow}>
       <View style={styles.toggleLabelGroup}>
         <Text style={styles.toggleLabel}>{label}</Text>
-        {badge ? <ProBadge label={badge} /> : null}
       </View>
       <Switch
         value={value}
@@ -485,6 +488,11 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     fontWeight: FONT_WEIGHTS.medium,
     paddingVertical: SPACING[2],
+  },
+  busyHint: {
+    textAlign: 'center',
+    fontSize: 12,
+    color: COLORS.mutedText,
   },
   disabled: { opacity: 0.7 },
 });

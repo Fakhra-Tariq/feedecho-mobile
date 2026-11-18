@@ -7,7 +7,12 @@ import type { ActivityItem } from '@/lib/studentsActivity';
 /** Module cache shared by Home and Progress. Empty string = fetched, no usable title. */
 const titleCache = new Map<string, string>();
 const inflight = new Map<string, Promise<void>>();
+const cacheListeners = new Set<() => void>();
 let loggedShape = false;
+
+function notifyTitleCache() {
+  cacheListeners.forEach((fn) => fn());
+}
 
 function visibleTitle(value: unknown) {
   const text = String(value ?? '').trim();
@@ -20,16 +25,30 @@ export function isGenericExitTicketTitle(value: unknown) {
   return !text || text === 'Exit Ticket';
 }
 
+export function activityTicketId(item: ActivityItem) {
+  return String(item.ticketId || '').trim();
+}
+
 export function resolveExitTicketActivityTitle(
   item: ActivityItem,
   titles: Record<string, string> = {}
 ) {
   if (item.type !== 'exitTicket') return visibleTitle(item.title);
-  const own = visibleTitle(item.title);
+  const own =
+    visibleTitle(item.title) || visibleTitle((item as { ticketTitle?: unknown }).ticketTitle);
   if (own && own !== 'Exit Ticket') return own;
-  const ticketId = String(item.ticketId || '').trim();
+  const ticketId = activityTicketId(item);
   const fetched = ticketId ? visibleTitle(titles[ticketId] ?? titleCache.get(ticketId)) : '';
   return fetched || 'Exit Ticket';
+}
+
+/** Seed the shared cache at submit so Home and Progress show the snapshot immediately. */
+export function rememberExitTicketTitle(ticketId: string, title: unknown) {
+  const id = String(ticketId || '').trim();
+  const text = visibleTitle(title);
+  if (!id || !text) return;
+  titleCache.set(id, text);
+  notifyTitleCache();
 }
 
 function uniqueTicketIdsNeedingTitle(items: ActivityItem[]) {
@@ -37,7 +56,7 @@ function uniqueTicketIdsNeedingTitle(items: ActivityItem[]) {
   items.forEach((item) => {
     if (item.type !== 'exitTicket') return;
     if (!isGenericExitTicketTitle(item.title)) return;
-    const id = String(item.ticketId || '').trim();
+    const id = activityTicketId(item);
     if (!id || ids.includes(id)) return;
     ids.push(id);
   });
@@ -57,6 +76,14 @@ async function readTicketTitle(ticketId: string) {
 export function useExitTicketActivityTitles(items: ActivityItem[]) {
   const [version, setVersion] = useState(0);
   const idsKey = uniqueTicketIdsNeedingTitle(items).join(',');
+
+  useEffect(() => {
+    const onChange = () => setVersion((n) => n + 1);
+    cacheListeners.add(onChange);
+    return () => {
+      cacheListeners.delete(onChange);
+    };
+  }, []);
 
   useEffect(() => {
     if (__DEV__ && !loggedShape) {
@@ -87,7 +114,7 @@ export function useExitTicketActivityTitles(items: ActivityItem[]) {
         })
         .finally(() => {
           inflight.delete(ticketId);
-          setVersion((n) => n + 1);
+          notifyTitleCache();
         });
       inflight.set(ticketId, request);
     });

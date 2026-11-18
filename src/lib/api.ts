@@ -7,7 +7,8 @@ export const API_BASE_URL =
 type RequestOptions = {
   method?: string;
   body?: unknown;
-  auth?: boolean;
+  /** true (default): require ID token. false: never send. 'optional': send if signed in. */
+  auth?: boolean | 'optional';
   onUploadProgress?: (loaded: number, total: number) => void;
 };
 
@@ -22,33 +23,50 @@ export class ApiError extends Error {
   }
 }
 
+async function authHeaders(mode: boolean | 'optional' | undefined) {
+  const headers: Record<string, string> = {};
+  if (mode === false) return headers;
+  const user = auth.currentUser;
+  if (!user) {
+    if (mode === 'optional') return headers;
+    throw new ApiError('Not signed in', 401);
+  }
+  const token = await user.getIdToken();
+  headers.Authorization = `Bearer ${token}`;
+  headers['X-User-ID'] = user.uid;
+  return headers;
+}
+
+function isFormDataBody(body: unknown): body is FormData {
+  return typeof FormData !== 'undefined' && body instanceof FormData;
+}
+
 export async function apiRequest<T = unknown>(path: string, options: RequestOptions = {}) {
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(await authHeaders(options.auth)),
   };
 
-  if (options.auth !== false) {
-    const user = auth.currentUser;
-    if (!user) {
-      throw new ApiError('Not signed in', 401);
-    }
-    const token = await user.getIdToken();
-    headers.Authorization = `Bearer ${token}`;
-    headers['X-User-ID'] = user.uid;
+  const isForm = isFormDataBody(options.body);
+  if (!isForm) {
+    headers['Content-Type'] = 'application/json';
   }
 
   const url = `${API_BASE_URL}${path}`;
   const method = options.method || (options.body ? 'POST' : 'GET');
-  const bodyText = options.body !== undefined ? JSON.stringify(options.body) : undefined;
+  const bodyPayload = isForm
+    ? options.body
+    : options.body !== undefined
+      ? JSON.stringify(options.body)
+      : undefined;
 
-  if (options.onUploadProgress && bodyText) {
-    return xhrJson<T>(url, method, headers, bodyText, options.onUploadProgress);
+  if (options.onUploadProgress && bodyPayload != null) {
+    return xhrSend<T>(url, method, headers, bodyPayload, options.onUploadProgress);
   }
 
   const response = await fetch(url, {
     method,
     headers,
-    body: bodyText,
+    body: bodyPayload as any,
   });
 
   let data: any = null;
@@ -69,11 +87,11 @@ export async function apiRequest<T = unknown>(path: string, options: RequestOpti
   return data as T;
 }
 
-function xhrJson<T>(
+function xhrSend<T>(
   url: string,
   method: string,
   headers: Record<string, string>,
-  bodyText: string,
+  body: string | FormData,
   onUploadProgress: (loaded: number, total: number) => void
 ): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -102,7 +120,7 @@ function xhrJson<T>(
       }
       resolve(data as T);
     };
-    xhr.onerror = () => reject(new ApiError('Network error', 0));
-    xhr.send(bodyText);
+    xhr.onerror = () => reject(new ApiError('Network error. Try again.', 0));
+    xhr.send(body as any);
   });
 }

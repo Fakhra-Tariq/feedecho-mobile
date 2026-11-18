@@ -19,6 +19,7 @@ import { AiQuizGeneratorModal } from '@/components/AiQuizGeneratorModal';
 import { showAlert } from '@/components/feedback';
 import { cleanErrorMessage } from '@/lib/activeActivity';
 import { CreateSessionModal } from '@/components/CreateSessionModal';
+import { HostNoSessionBanner } from '@/components/HostNoSessionBanner';
 import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING } from '@/constants/theme';
 import { useHostSessions, useSessionActivityLabel } from '@/context/HostSessionContext';
 import { getQuizEditorTypeParam } from '@/lib/aiGeneratedQuiz';
@@ -63,8 +64,6 @@ const QUESTION_TYPES = [
   { key: 'short-answer', title: 'Short Answer', icon: 'create-outline' as const },
 ] as const;
 
-const HERO_PLUM = '#6D415F';
-const HERO_BROWN = '#3A2E2A';
 const CARD_BORDER = 'rgba(109, 65, 95, 0.15)';
 /** Opaque composites of Web `.surface-card` stops on white (index.css). */
 const CARD_GRAD = ['#FFFFFF', '#F8F6F7', '#EDE8EC'] as const;
@@ -167,40 +166,21 @@ export default function QuizHubScreen() {
         ]}
         showsVerticalScrollIndicator={false}>
         {/* Session banner — same conditions as Web SessionLaunchBanner */}
-        <View style={styles.banner} accessibilityRole="text">
-          {isActive ? (
-            <>
-              <Ionicons name="checkmark-circle" size={16} color={COLORS.primary} />
-              <Text style={styles.bannerText}>
-                Launching to session:{' '}
-                <Text style={styles.bannerCode}>{sessionCode || '—'}</Text>
-                {' · '}
-                {activityLabel}
-              </Text>
-            </>
-          ) : (
-            <>
-              <Ionicons name="warning-outline" size={16} color={COLORS.primary} />
-              <Text style={styles.bannerText}>
-                {"You'll need an active session to launch this. "}
-                <Text
-                  style={styles.bannerLink}
-                  onPress={() => setShowCreateSession(true)}
-                  accessibilityRole="button"
-                  accessibilityLabel="Create Session">
-                  Create Session
-                </Text>
-              </Text>
-            </>
-          )}
-        </View>
+        {isActive ? (
+          <View style={styles.banner} accessibilityRole="text">
+            <Ionicons name="checkmark-circle" size={16} color={COLORS.primary} />
+            <Text style={styles.bannerText}>
+              Launching to session:{' '}
+              <Text style={styles.bannerCode}>{sessionCode || '—'}</Text>
+              {' · '}
+              {activityLabel}
+            </Text>
+          </View>
+        ) : (
+          <HostNoSessionBanner onCreateSession={() => setShowCreateSession(true)} />
+        )}
 
-        {/* Hero — Web PageHeaderCard `from-[#6D415F] to-[#3A2E2A]` */}
-        <LinearGradient
-          colors={[HERO_PLUM, HERO_BROWN]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.hero}>
+        <View style={styles.hero}>
           <Text style={styles.heroTitle}>Create a New Quiz</Text>
           <Pressable
             onPress={() => setShowHowItWorks(true)}
@@ -213,7 +193,7 @@ export default function QuizHubScreen() {
             <Ionicons name="chevron-forward" size={14} color="rgba(255,255,255,0.9)" />
           </Pressable>
           <Text style={styles.heroSubtitle}>{"Choose how you'd like to build your next quiz"}</Text>
-        </LinearGradient>
+        </View>
 
         {/* 2×2 option grid */}
         <View style={styles.grid}>
@@ -463,6 +443,7 @@ const styles = StyleSheet.create({
     textDecorationLine: 'underline',
   },
   hero: {
+    backgroundColor: COLORS.primary,
     borderRadius: 24,
     borderWidth: 1,
     borderColor: 'rgba(109, 65, 95, 0.3)',

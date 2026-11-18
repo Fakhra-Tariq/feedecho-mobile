@@ -57,7 +57,14 @@ export default function EditQuizScreen() {
     );
   }
 
-  return <QuizEditorScreen quizType={normalizeQuizTypeLabel(quiz.type)} initialQuiz={quiz} />;
+  const quizType = normalizeQuizTypeLabel(quiz.type);
+  return (
+    <QuizEditorScreen
+      quizType={quizType}
+      initialQuiz={quiz}
+      showAiGenerator={quizType !== 'Mixed Type'}
+    />
+  );
 }
 
 const styles = StyleSheet.create({

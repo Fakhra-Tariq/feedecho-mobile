@@ -1,15 +1,12 @@
 import { Tabs } from 'expo-router';
 
-import { HostHeaderLogo } from '@/components/HostHeaderLogo';
 import { HostProfileButton } from '@/components/HostProfileButton';
 import { TAB_BAR_INACTIVE_COLOR, TabBarGlyph, TabBarLabel } from '@/components/TabBarGlyph';
 import { COLORS, FONT_WEIGHTS } from '@/constants/theme';
 import { useSafeTabBarStyle } from '@/lib/tabBarSafeArea';
 
 /**
- * Host tabs match Web HostLayout order:
- * Explore → Sessions → Quiz → Library → Space Race → Exit Ticket → Reports
- * Live Chat is a sibling stack screen (host/live-chat), not a tab.
+ * Host tabs: Explore → Sessions → Quiz → Library → Chat → Race → Ticket → Reports
  * Profile is reached from the header avatar/name (same as Web navbar).
  */
 export default function HostTabsLayout() {
@@ -30,7 +27,7 @@ export default function HostTabsLayout() {
         tabBarActiveTintColor: COLORS.plumInk,
         tabBarInactiveTintColor: TAB_BAR_INACTIVE_COLOR,
         tabBarStyle,
-        tabBarItemStyle: { minHeight: 44 },
+        tabBarItemStyle: { flex: 1, minHeight: 44, paddingHorizontal: 0 },
         tabBarHideOnKeyboard: true,
         sceneStyle: { backgroundColor: COLORS.background },
       }}>
@@ -73,11 +70,31 @@ export default function HostTabsLayout() {
         options={{
           title: 'Library',
           headerTitleAlign: 'left',
-          headerTitle: () => <HostHeaderLogo />,
+          headerTitleStyle: { fontWeight: FONT_WEIGHTS.semibold, color: COLORS.header },
           tabBarLabel: ({ focused }) => <TabBarLabel focused={focused}>Library</TabBarLabel>,
           tabBarAccessibilityLabel: 'Library',
           tabBarIcon: ({ focused }) => (
             <TabBarGlyph focused={focused} outline="library-outline" filled="library" />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="live-chat"
+        options={{
+          title: 'Anonymous Chat',
+          headerTitleStyle: {
+            fontSize: 20,
+            fontWeight: FONT_WEIGHTS.medium,
+            color: COLORS.ink,
+          },
+          tabBarLabel: ({ focused }) => <TabBarLabel focused={focused}>Chat</TabBarLabel>,
+          tabBarAccessibilityLabel: 'Chat',
+          tabBarIcon: ({ focused }) => (
+            <TabBarGlyph
+              focused={focused}
+              outline="chatbubbles-outline"
+              filled="chatbubbles"
+            />
           ),
         }}
       />

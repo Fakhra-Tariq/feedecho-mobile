@@ -1,6 +1,11 @@
 import { router, type Href } from 'expo-router';
 
 import { showAlert } from '@/components/feedback';
+import {
+  liveActivityBlocksLaunch,
+  type LiveHostActivity,
+  type LiveHostActivityKind,
+} from '@/lib/liveHostActivity';
 import { isQuizCurrentlyActive, type QuizExpiryInput } from '@/lib/quizExpiry';
 
 export type ActiveActivityKind = 'quiz' | 'spacerace' | 'exitticket' | 'livechat' | null;
@@ -23,6 +28,7 @@ export type ActiveActivityMeta = {
 /** Last `sessions/{id}.currentActivity` + quizzes from HostSessionProvider (same as the launch pill). */
 let syncedCurrentActivity: unknown = null;
 let syncedQuizzes: QuizExpiryInput[] | null = null;
+let syncedLiveActivity: LiveHostActivity | null = null;
 let syncedHostPath = '';
 
 export function syncActiveActivitySource(
@@ -31,6 +37,11 @@ export function syncActiveActivitySource(
 ) {
   syncedCurrentActivity = currentActivity ?? null;
   if (arguments.length > 1) syncedQuizzes = quizzes ?? null;
+}
+
+/** Banner source of truth: live chat/quiz/race/ticket statuses. */
+export function syncLiveHostActivity(live: LiveHostActivity | null) {
+  syncedLiveActivity = live ?? null;
 }
 
 export function setHostPathname(path: string) {
@@ -162,11 +173,27 @@ export function resolveActiveActivityMeta(
   currentActivity: unknown,
   errorMessage?: string
 ): ActiveActivityMeta {
+  if (syncedLiveActivity) return metaForActivityKind(syncedLiveActivity.type);
   const fromSync = getActiveActivity(syncedCurrentActivity, syncedQuizzes);
   if (fromSync) return metaForActivityKind(fromSync.type);
   const fromArg = getActiveActivity(currentActivity, syncedQuizzes);
   if (fromArg) return metaForActivityKind(fromArg.type);
   return metaForActivityKind(kindFromErrorMessage(errorMessage));
+}
+
+/**
+ * Mobile-only pre-check before a launch write. Uses the same live-activity
+ * source as the session banner. Does not write; the API still atomically
+ * claims `sessions/{id}.currentActivity` (RTDB, not Firestore).
+ */
+export function blockMobileLaunchIfBusy(
+  live: LiveHostActivity | null | undefined,
+  launching?: { type: LiveHostActivityKind; id?: string | null }
+): boolean {
+  const source = live === undefined ? syncedLiveActivity : live;
+  if (!liveActivityBlocksLaunch(source, launching)) return false;
+  showActivityBlockedAlert();
+  return true;
 }
 
 export function isActivityConflictMessage(message: string) {

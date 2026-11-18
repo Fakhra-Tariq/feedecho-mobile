@@ -1,5 +1,6 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router, type Href } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { AuthDivider, GoogleSignInButton } from '@/components/AuthExtras';
@@ -15,21 +16,29 @@ import {
 } from '@/lib/audienceHomeNavigation';
 import { markGuestSessionActive } from '@/lib/guestSession';
 import { navigateToJoinedActivity } from '@/lib/joinSessionNavigation';
-import {
-  GUEST_QUIZ_ALREADY_ATTEMPTED,
-  guestJoinBlockReason,
-} from '@/lib/studentParticipation';
 
 type Props = {
   showBack?: boolean;
   /** Where this join form was opened from. */
   entrySource: ActivityEntrySource;
+  /** Guest banner "Log in" — keep activity mounted underneath and return after sign-in. */
+  fromBanner?: boolean;
+  prefillCode?: string;
+  prefillName?: string;
+  useDifferentName?: boolean;
 };
 
-export function JoinSessionForm({ showBack = false, entrySource }: Props) {
+export function JoinSessionForm({
+  showBack = false,
+  entrySource,
+  fromBanner = false,
+  prefillCode = '',
+  prefillName = '',
+  useDifferentName = false,
+}: Props) {
   const { joinSession, audienceSignIn, audienceSignInWithGoogle, profile, isHost } = useAuth();
   const [, , promptAsync] = useGoogleIdTokenRequest();
-  const showAuthExtras = entrySource === 'public' && !isHost;
+  const showAuthExtras = (entrySource === 'public' || fromBanner) && !isHost;
 
   const [name, setName] = useState(profile?.name || '');
   const [code, setCode] = useState('');
@@ -50,23 +59,58 @@ export function JoinSessionForm({ showBack = false, entrySource }: Props) {
   const [googleLoading, setGoogleLoading] = useState(false);
   const [authSubmitting, setAuthSubmitting] = useState(false);
 
-  const isGuestJoin = entrySource === 'public' && !isHost && !profile?.uid;
+  useEffect(() => {
+    const paramCode = String(prefillCode || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '')
+      .slice(0, 6);
+    if (paramCode) setCode(paramCode);
+    if (useDifferentName) setName('');
+  }, [prefillCode, useDifferentName]);
+
+  useEffect(() => {
+    if (!fromBanner) return;
+    let cancelled = false;
+    void (async () => {
+      const paramCode = String(prefillCode || '')
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '')
+        .slice(0, 6);
+      const storedCode = String((await AsyncStorage.getItem('sessionCode')) || '')
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '')
+        .slice(0, 6);
+      const storedName = String((await AsyncStorage.getItem('studentName')) || '').trim();
+      if (cancelled) return;
+      const nextCode = paramCode || storedCode;
+      if (nextCode) setCode(nextCode);
+      if (useDifferentName) {
+        setName('');
+        return;
+      }
+      const nextName = String(prefillName || '').trim() || storedName;
+      if (nextName) setName((prev) => prev || nextName);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [fromBanner, prefillCode, prefillName, useDifferentName]);
+
+  const returnAfterBannerLogin = () => {
+    if (fromBanner && router.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace('/audience' as Href);
+  };
 
   const runJoin = async (trimmedName: string, trimmedCode: string, teamId: number | null = null) => {
     setError('');
     setSubmitting(true);
     try {
-      if (isGuestJoin && teamId == null) {
-        try {
-          const blocked = await guestJoinBlockReason(trimmedName, trimmedCode);
-          if (blocked) {
-            setError(blocked);
-            return;
-          }
-        } catch (checkErr) {
-          console.warn('[guest submit check] network error, allowing join', checkErr);
-        }
-      }
       // Marker must exist before isStudent flips so guards never treat this
       // code-join as a logged-in student landing on Home/Progress/Study/Profile.
       if (entrySource === 'public') markGuestSessionActive();
@@ -100,8 +144,7 @@ export function JoinSessionForm({ showBack = false, entrySource }: Props) {
       }
 
       const joinError = result.error || 'Failed to join session. Please try again.';
-      if (isGuestJoin && /already completed this quiz/i.test(joinError)) {
-        setError(GUEST_QUIZ_ALREADY_ATTEMPTED);
+      if (/already been used on this device/i.test(joinError)) {
         return;
       }
       setError(joinError);
@@ -142,8 +185,8 @@ export function JoinSessionForm({ showBack = false, entrySource }: Props) {
     setGoogleLoading(false);
     setAuthSubmitting(false);
     if (result.success) {
-      console.log('[TEMP DEBUG] JoinSessionForm Google login replace', { to: '/audience' });
-      router.replace('/audience' as Href);
+      console.log('[TEMP DEBUG] JoinSessionForm Google login', { fromBanner, to: fromBanner ? 'back' : '/audience' });
+      returnAfterBannerLogin();
       return;
     }
     setAuthError(result.error || 'Google sign-in failed. Please try again.');
@@ -166,8 +209,8 @@ export function JoinSessionForm({ showBack = false, entrySource }: Props) {
     setAuthLoading(false);
     setAuthSubmitting(false);
     if (result.success) {
-      console.log('[TEMP DEBUG] JoinSessionForm email login replace', { to: '/audience' });
-      router.replace('/audience' as Href);
+      console.log('[TEMP DEBUG] JoinSessionForm email login', { fromBanner, to: fromBanner ? 'back' : '/audience' });
+      returnAfterBannerLogin();
       return;
     }
     setAuthError(result.error || 'Login failed. Please try again.');

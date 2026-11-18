@@ -5,5 +5,11 @@ import { quizTypeFromParam } from '@/lib/aiGeneratedQuiz';
 
 export default function CreateQuizScreen() {
   const { type } = useLocalSearchParams<{ type: string }>();
-  return <QuizEditorScreen quizType={quizTypeFromParam(String(type || 'mixed-type'))} />;
+  const quizType = quizTypeFromParam(String(type || 'mixed-type'));
+  return (
+    <QuizEditorScreen
+      quizType={quizType}
+      showAiGenerator={quizType !== 'Mixed Type'}
+    />
+  );
 }

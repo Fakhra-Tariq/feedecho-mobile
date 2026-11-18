@@ -1,15 +1,25 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
+  Dimensions,
+  Keyboard,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import {
+  initialWindowMetrics,
+  SafeAreaProvider,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
 
 import {
   formatJoinDurationLabel,
@@ -56,6 +66,46 @@ type Props = {
   onSave: (raceId: string, settings: SettingsState) => Promise<void> | void;
   onDelete: (raceId: string) => void;
 };
+
+function androidModalNavInset() {
+  if (Platform.OS !== 'android') return 0;
+  const screenH = Dimensions.get('screen').height;
+  const windowH = Dimensions.get('window').height;
+  const status = StatusBar.currentHeight ?? 0;
+  return Math.max(0, screenH - windowH - status);
+}
+
+/** RN Modal is a new window; root useSafeAreaInsets() is often 0 on Android 3-button nav. */
+function SheetFooter({ children }: { children: ReactNode }) {
+  const insets = useSafeAreaInsets();
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+
+  useEffect(() => {
+    const show = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => setKeyboardOpen(true)
+    );
+    const hide = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setKeyboardOpen(false)
+    );
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+
+  const navInset = Math.max(
+    insets.bottom,
+    initialWindowMetrics?.insets.bottom ?? 0,
+    androidModalNavInset(),
+    // Modal windows often report 0 inset; 3-button nav still needs clearance.
+    Platform.OS === 'android' ? 24 : 8
+  );
+  const paddingBottom = keyboardOpen ? 12 : navInset + 16;
+
+  return <View style={[styles.footer, { paddingBottom }]}>{children}</View>;
+}
 
 function buildInitial(race: SpaceRace | null): SettingsState {
   const s = race?.settings;
@@ -171,7 +221,11 @@ export function SpaceRaceSettingsModal({
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.overlay}>
+      <SafeAreaProvider initialMetrics={initialWindowMetrics ?? undefined}>
+      <KeyboardAvoidingView
+        style={styles.overlay}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={0}>
         <View style={styles.sheet}>
           <View style={styles.header}>
             <Text style={styles.title}>Space Race Settings</Text>
@@ -186,8 +240,10 @@ export function SpaceRaceSettingsModal({
           </View>
 
           <ScrollView
+            style={styles.scroll}
             contentContainerStyle={styles.content}
             keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
             showsVerticalScrollIndicator={false}>
             <View style={styles.codeBlock}>
               <Text style={styles.codeHeading}>Race Code</Text>
@@ -319,7 +375,7 @@ export function SpaceRaceSettingsModal({
             />
           </ScrollView>
 
-          <View style={styles.footer}>
+          <SheetFooter>
             <Pressable
               style={styles.deleteBtn}
               onPress={handleDelete}
@@ -352,9 +408,10 @@ export function SpaceRaceSettingsModal({
                 )}
               </Pressable>
             </View>
-          </View>
+          </SheetFooter>
         </View>
-      </View>
+      </KeyboardAvoidingView>
+      </SafeAreaProvider>
     </Modal>
   );
 }
@@ -430,6 +487,11 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     maxHeight: '92%',
+    overflow: 'hidden',
+  },
+  scroll: {
+    flexGrow: 0,
+    flexShrink: 1,
   },
   header: {
     flexDirection: 'row',
@@ -450,7 +512,7 @@ const styles = StyleSheet.create({
   content: {
     padding: SPACING[4],
     gap: SPACING[4],
-    paddingBottom: SPACING[8],
+    paddingBottom: SPACING[6],
   },
   codeBlock: {
     backgroundColor: COLORS.blush,
@@ -545,9 +607,11 @@ const styles = StyleSheet.create({
   footer: {
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.divider,
-    padding: SPACING[4],
-    gap: SPACING[3],
+    paddingHorizontal: SPACING[4],
+    paddingTop: 12,
+    gap: 12,
     backgroundColor: COLORS.white,
+    flexShrink: 0,
   },
   deleteBtn: {
     flexDirection: 'row',
@@ -557,10 +621,11 @@ const styles = StyleSheet.create({
     minHeight: 44,
   },
   deleteLabel: { color: COLORS.primary, fontWeight: FONT_WEIGHTS.semibold },
-  footerRight: { flexDirection: 'row', gap: SPACING[2] },
+  footerRight: { flexDirection: 'row', gap: SPACING[2], flexShrink: 0 },
   cancelBtn: {
     flex: 1,
     minHeight: 44,
+    flexShrink: 0,
     borderRadius: RADIUS.md,
     alignItems: 'center',
     justifyContent: 'center',
@@ -570,6 +635,7 @@ const styles = StyleSheet.create({
   saveBtn: {
     flex: 1,
     minHeight: 44,
+    flexShrink: 0,
     borderRadius: RADIUS.md,
     alignItems: 'center',
     justifyContent: 'center',

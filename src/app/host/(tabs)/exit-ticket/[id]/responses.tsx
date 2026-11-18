@@ -3,15 +3,20 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
 } from 'react-native';
 
+import { ExitTicketWordCloudPresent } from '@/components/Host/ExitTicketWordCloudPresent';
+import { showToast } from '@/components/feedback';
 import { COLORS, FONT_WEIGHTS } from '@/constants/theme';
 import {
+  clearExitTicketResponses,
   getExitTicketById,
   getExitTicketResponses,
   normalizeExitResponsesPayload,
@@ -20,6 +25,7 @@ import {
   type ExitTicket,
 } from '@/lib/hostExitTickets';
 import { useRtdbList } from '@/lib/useRtdb';
+import { buildCloudItemsForQuestion } from '@/utils/wordCloud';
 
 export default function ExitTicketResponsesScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -28,8 +34,12 @@ export default function ExitTicketResponsesScreen() {
   const [apiResponses, setApiResponses] = useState<ExitResponse[]>([]);
   const [selectedQuestion, setSelectedQuestion] = useState(0);
   const [showAttendanceNames, setShowAttendanceNames] = useState(false);
+  const [presentingCloud, setPresentingCloud] = useState(false);
+  const [shortTextMode, setShortTextMode] = useState<'words' | 'phrases'>('words');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const { width: windowWidth, fontScale } = useWindowDimensions();
 
   const { list: liveResponses } = useRtdbList(
     ticketId ? `exit_responses/${ticketId}` : null,
@@ -124,8 +134,55 @@ export default function ExitTicketResponsesScreen() {
     router.back();
   };
 
+  const stackHeaderActions = windowWidth < 340 || fontScale > 1.2;
+  const compactLabels = windowWidth < 360 || fontScale > 1.1;
+  const canClear = responses.length > 0 && !clearing && !loading;
+
+  const runClearResponses = async () => {
+    if (!ticketId || clearing) return;
+    setClearing(true);
+    try {
+      await clearExitTicketResponses(ticketId);
+      setApiResponses([]);
+      setShowAttendanceNames(false);
+      showToast({ type: 'success', title: 'Responses cleared' });
+    } catch (err) {
+      showToast({
+        type: 'info',
+        title: 'Failed to clear responses',
+        message: err instanceof Error ? err.message : 'Unknown error',
+      });
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const onPressClear = () => {
+    if (!canClear) return;
+    Alert.alert(
+      'Clear all responses?',
+      'This will delete all responses for this exit ticket. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Clear', style: 'destructive', onPress: () => void runClearResponses() },
+      ]
+    );
+  };
+
   const audienceLabel =
     responses.length === 1 ? '1 audience member' : `${responses.length} audience members`;
+
+  const activeQuestion = questions[selectedQuestion];
+  const cloudData = useMemo(
+    () =>
+      buildCloudItemsForQuestion(
+        responses,
+        selectedQuestion,
+        activeQuestion || { type: 'short_text' },
+        shortTextMode
+      ),
+    [responses, selectedQuestion, activeQuestion, shortTextMode]
+  );
 
   return (
     <View style={styles.overlay}>
@@ -151,6 +208,48 @@ export default function ExitTicketResponsesScreen() {
             </Pressable>
           </View>
           <Text style={styles.subtitle}>Anonymous responses from {audienceLabel}</Text>
+          {!loading && ticket ? (
+            <View style={[styles.headerActions, stackHeaderActions && styles.headerActionsStack]}>
+              <Pressable
+                onPress={() => setPresentingCloud(true)}
+                style={({ pressed }) => [
+                  styles.headerBtn,
+                  styles.wordCloudBtn,
+                  compactLabels && styles.headerBtnCompact,
+                  pressed && styles.wordCloudBtnPressed,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Word Cloud"
+                accessibilityState={{ disabled: false }}>
+                <Ionicons name="cloud-outline" size={16} color="#4A1F3D" />
+                <Text
+                  style={[styles.wordCloudLabel, compactLabels && styles.headerLabelCompact]}
+                  numberOfLines={1}>
+                  Word Cloud
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={onPressClear}
+                disabled={!canClear}
+                style={({ pressed }) => [
+                  styles.headerBtn,
+                  styles.clearBtn,
+                  compactLabels && styles.headerBtnCompact,
+                  !canClear && styles.clearBtnDisabled,
+                  canClear && pressed && styles.clearBtnPressed,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Clear Responses"
+                accessibilityState={{ disabled: !canClear }}>
+                <Ionicons name="trash-outline" size={16} color="#FFFFFF" />
+                <Text
+                  style={[styles.clearLabel, compactLabels && styles.headerLabelCompact]}
+                  numberOfLines={1}>
+                  Clear Responses
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
         </View>
         <View style={styles.hairline} />
 
@@ -265,6 +364,25 @@ export default function ExitTicketResponsesScreen() {
           </>
         )}
       </View>
+      <ExitTicketWordCloudPresent
+        open={presentingCloud}
+        onClose={() => setPresentingCloud(false)}
+        questionIndex={selectedQuestion}
+        questionCount={Math.max(questionCount, 1)}
+        onPrev={() =>
+          setSelectedQuestion((prev) => (prev - 1 + Math.max(questionCount, 1)) % Math.max(questionCount, 1))
+        }
+        onNext={() =>
+          setSelectedQuestion((prev) => (prev + 1) % Math.max(questionCount, 1))
+        }
+        question={activeQuestion}
+        items={cloudData.items}
+        extra={cloudData.extra}
+        responseCount={responses.length}
+        shortTextMode={shortTextMode}
+        onShortTextModeChange={setShortTextMode}
+        seedKey={`${ticketId}:${selectedQuestion}`}
+      />
     </View>
   );
 }
@@ -311,6 +429,56 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   subtitle: { color: '#5F5460', fontSize: 12, marginTop: 4 },
+  headerActions: {
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 8,
+  },
+  headerActionsStack: {
+    flexDirection: 'column',
+  },
+  headerBtn: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+  },
+  headerBtnCompact: {
+    paddingHorizontal: 6,
+  },
+  wordCloudBtn: {
+    borderColor: '#6B3A5C',
+    backgroundColor: '#FFFFFF',
+  },
+  wordCloudBtnPressed: { backgroundColor: '#E6D2DF' },
+  wordCloudLabel: {
+    flexShrink: 1,
+    color: '#4A1F3D',
+    fontSize: 13,
+    fontWeight: FONT_WEIGHTS.medium,
+  },
+  headerLabelCompact: {
+    fontSize: 12,
+  },
+  clearBtn: {
+    borderColor: '#6B3A5C',
+    backgroundColor: '#6B3A5C',
+  },
+  clearBtnPressed: { backgroundColor: '#5A2D4C' },
+  clearBtnDisabled: { opacity: 0.5 },
+  clearLabel: {
+    flexShrink: 1,
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: FONT_WEIGHTS.medium,
+  },
   hairline: { height: 1, backgroundColor: '#EFE7EC' },
   centered: {
     padding: 24,

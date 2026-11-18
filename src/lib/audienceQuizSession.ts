@@ -1,5 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { normalizeGuestName } from '@/lib/guestAttemptIdentity';
+
 /** Same key Web uses in localStorage for the locked join session. */
 export const STUDENT_SESSION_KEY = 'studentSession';
 const QUIZ_PARTICIPANT_SESSIONS_KEY = 'quizParticipantSessions';
@@ -109,6 +111,38 @@ export async function saveLocalQuizSubmission(incoming: Record<string, unknown>)
   }
 }
 
+function rowMatchesLocalIdentity(
+  row: any,
+  identity: {
+    participantId?: string | null;
+    studentUid?: string | null;
+    studentEmail?: string | null;
+    studentName?: string | null;
+  }
+) {
+  if (identity.participantId && String(row.participantId) === String(identity.participantId)) {
+    return true;
+  }
+  if (identity.studentUid && row.studentUid && String(row.studentUid) === String(identity.studentUid)) {
+    return true;
+  }
+  if (
+    identity.studentEmail &&
+    row.studentEmail &&
+    String(row.studentEmail).toLowerCase() === String(identity.studentEmail).toLowerCase()
+  ) {
+    return true;
+  }
+  if (
+    identity.studentName &&
+    row.studentName &&
+    normalizeGuestName(String(row.studentName)) === normalizeGuestName(String(identity.studentName))
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export async function hasLocalQuizSubmission(
   quizId: string,
   identity: {
@@ -124,27 +158,31 @@ export async function hasLocalQuizSubmission(
     if (!Array.isArray(list)) return false;
     return list.some((row: any) => {
       if (!row || String(row.quizId) !== String(quizId)) return false;
-      if (identity.participantId && row.participantId === identity.participantId) return true;
-      if (identity.studentUid && row.studentUid === identity.studentUid) return true;
-      if (
-        identity.studentEmail &&
-        row.studentEmail &&
-        String(row.studentEmail).toLowerCase() === String(identity.studentEmail).toLowerCase()
-      ) {
-        return true;
-      }
-      if (
-        identity.studentName &&
-        row.studentName &&
-        String(row.studentName).trim() === String(identity.studentName).trim()
-      ) {
-        return true;
-      }
-      return false;
+      return rowMatchesLocalIdentity(row, identity);
     });
   } catch {
     return false;
   }
+}
+
+/** Device-local completed attempt for this join code (same as Web findLocalQuizSubmissionForJoin). */
+export async function findLocalQuizSubmissionForJoin(identity: {
+  sessionCode?: string | null;
+  studentUid?: string | null;
+  studentEmail?: string | null;
+  studentName?: string | null;
+}) {
+  const code = String(identity.sessionCode || '')
+    .trim()
+    .toUpperCase();
+  if (!code) return null;
+  const list = await readLocalQuizSubmissions();
+  return (
+    list.find((row: any) => {
+      if (String(row?.sessionCode || '').trim().toUpperCase() !== code) return false;
+      return rowMatchesLocalIdentity(row, identity);
+    }) || null
+  );
 }
 
 /**

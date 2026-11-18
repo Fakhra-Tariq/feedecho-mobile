@@ -1,9 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { router, useLocalSearchParams, type Href } from 'expo-router';
+import { router, useLocalSearchParams, usePathname, type Href } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  AppState,
   FlatList,
   ScrollView,
   StyleSheet,
@@ -15,6 +16,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AudienceActivityHeader } from '@/components/Audience/AudienceActivityHeader';
+import { AudiencePostActivityHomeButton } from '@/components/Audience/AudiencePostActivityHomeButton';
 import { GuestProgressLoginBanner } from '@/components/Audience/GuestProgressLoginBanner';
 import {
   SPACE_RACE_FAB_BOTTOM_PAD,
@@ -29,13 +31,22 @@ import {
   appendActivityEntrySource,
   useLeaveActivity,
 } from '@/lib/audienceHomeNavigation';
+import { ApiError } from '@/lib/api';
 import { getRaceByCode, joinSessionUnified, startTeamQuiz } from '@/lib/hostSpaceRaces';
+import {
+  getQuizDeadlineMs,
+  isSpaceRaceEndedByTeacher,
+  isSpaceRaceQuizPath,
+  resolveSpaceRaceAudiencePhase,
+  useAlignedNowMs,
+} from '@/lib/spaceRaceAudiencePhase';
+import { isJoinWindowExpired, isJoinWindowExpiredError } from '@/lib/spaceRaceJoinWindow';
 import { bootstrapSpaceRaceQuiz, teamQuizCacheKey } from '@/lib/spaceRaceAudienceQuiz';
 import {
   loadSpaceRaceParticipant,
+  rememberSpaceRaceQuizEndTime,
   saveSpaceRaceParticipant,
 } from '@/lib/spaceRaceSession';
-import { getRaceStatus } from '@/lib/spaceRaceTeams';
 import { useRtdbList, useRtdbValue } from '@/lib/useRtdb';
 
 const SESSION_CODE_KEY = 'sessionCode';
@@ -51,8 +62,8 @@ function isLoggedInAudience(
   return Boolean(uid && email);
 }
 
-/** Join-duration countdown — same formula as Web JoinDurationTimer. */
-function JoinDurationTimer({ race }: { race: any }) {
+/** Join-duration countdown — same formula as Web JoinDurationTimer, with server offset. */
+function JoinDurationTimer({ race, serverTimeOffset = 0 }: { race: any; serverTimeOffset?: number }) {
   const [timeLeft, setTimeLeft] = useState('--:--');
 
   useEffect(() => {
@@ -68,7 +79,7 @@ function JoinDurationTimer({ race }: { race: any }) {
           setTimeLeft(`${joinDurationMinutes}:00`);
           return;
         }
-        const now = Date.now();
+        const now = Date.now() + (Number(serverTimeOffset) || 0);
         const start = new Date(race.startedAt).getTime();
         const joinDurationMinutes = race.settings?.joinDuration || 30;
         const endTime = start + joinDurationMinutes * 60 * 1000;
@@ -89,8 +100,14 @@ function JoinDurationTimer({ race }: { race: any }) {
 
     tick();
     const timer = setInterval(tick, 1000);
-    return () => clearInterval(timer);
-  }, [race]);
+    const appSub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') tick();
+    });
+    return () => {
+      clearInterval(timer);
+      appSub.remove();
+    };
+  }, [race, serverTimeOffset]);
 
   return <Text style={styles.timeValue}>{timeLeft}</Text>;
 }
@@ -99,8 +116,13 @@ export default function AudienceSpaceRaceScreen() {
   const { profile, user } = useAuth();
   const { leave, source } = useLeaveActivity({ headerBack: false });
   const insets = useSafeAreaInsets();
-  const [raceEnded, setRaceEnded] = useState(false);
-  const params = useLocalSearchParams<{ code?: string; raceId?: string }>();
+  const pathname = usePathname();
+  const params = useLocalSearchParams<{
+    code?: string;
+    raceId?: string;
+    alreadyAttemptedOnDevice?: string;
+  }>();
+  const alreadyAttemptedOnDeviceParam = String(params.alreadyAttemptedOnDevice || '') === '1';
   const [codeInput, setCodeInput] = useState('');
   const [raceId, setRaceId] = useState<string | null>(params.raceId ? String(params.raceId) : null);
   const [raceMeta, setRaceMeta] = useState<any>(null);
@@ -108,13 +130,20 @@ export default function AudienceSpaceRaceScreen() {
   const [phase, setPhase] = useState<'join' | 'team' | 'lobby'>('join');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [guestBlockedOnDevice, setGuestBlockedOnDevice] = useState(alreadyAttemptedOnDeviceParam);
   const [selectedTeam, setSelectedTeam] = useState<number | null>(null);
 
   const loggedIn = isLoggedInAudience(profile, user);
 
-  const { value: liveRace } = useRtdbValue(raceId ? `spaceRaces/${raceId}` : null, {
+  const { value: liveRace, loading: raceLoading } = useRtdbValue(raceId ? `spaceRaces/${raceId}` : null, {
     enabled: Boolean(raceId),
   });
+  const { value: serverTimeOffsetRaw } = useRtdbValue('.info/serverTimeOffset', {
+    enabled: Boolean(raceId),
+  });
+  const serverTimeOffset = Number(serverTimeOffsetRaw) || 0;
+  const alignedNowMs = useAlignedNowMs(serverTimeOffset, Boolean(raceId));
+  const [joinBlockedByApi, setJoinBlockedByApi] = useState(false);
   const { list: participants } = useRtdbList(
     raceId ? `space_race_participants/${raceId}` : null,
     { enabled: Boolean(raceId) }
@@ -161,20 +190,9 @@ export default function AudienceSpaceRaceScreen() {
     race?.quizId || race?.quiz?.id || race?.quiz?.questions?.length
   );
 
-  const [quizTimeExpired, setQuizTimeExpired] = useState(false);
-  useEffect(() => {
-    if (!teamTimer?.endTime) {
-      setQuizTimeExpired(false);
-      return undefined;
-    }
-    const checkExpired = () => {
-      const end = new Date(teamTimer.endTime).getTime();
-      setQuizTimeExpired(Number.isFinite(end) && end <= Date.now());
-    };
-    checkExpired();
-    const interval = setInterval(checkExpired, 1000);
-    return () => clearInterval(interval);
-  }, [teamTimer?.endTime]);
+  const joinWindowExpired =
+    joinBlockedByApi ||
+    ((!raceLoading || Boolean(race)) && isJoinWindowExpired(race, alignedNowMs));
 
   const hasAttemptedQuiz = useMemo(() => {
     const me = liveParticipant;
@@ -196,8 +214,18 @@ export default function AudienceSpaceRaceScreen() {
       : answers && typeof answers === 'object'
         ? Object.values(answers).some((answer: any) => answer && answer.awardedByTeammate !== true)
         : false;
-    return Boolean(hasPersonalAnswers) || Boolean(me.completedAt);
-  }, [liveParticipant, race?.currentLaunchId, race?.startedAt]);
+    return Boolean(hasPersonalAnswers) || Boolean(me.completedAt) || guestBlockedOnDevice;
+  }, [liveParticipant, race?.currentLaunchId, race?.startedAt, guestBlockedOnDevice]);
+
+  const audiencePhase = resolveSpaceRaceAudiencePhase({
+    completed: hasAttemptedQuiz,
+    insideQuiz: isSpaceRaceQuizPath(pathname),
+    race,
+    nowMs: alignedNowMs,
+    quizEndMs: getQuizDeadlineMs(teamTimer?.endTime),
+    joinExpired: joinWindowExpired,
+  });
+  const showWelcomeClosed = audiencePhase === 'closed';
 
   useEffect(() => {
     (async () => {
@@ -215,6 +243,20 @@ export default function AudienceSpaceRaceScreen() {
 
   useEffect(() => {
     (async () => {
+      if (alreadyAttemptedOnDeviceParam) {
+        setGuestBlockedOnDevice(true);
+        setPhase('lobby');
+        const code = String(params.code || codeInput || '')
+          .trim()
+          .toUpperCase();
+        if (!raceId && code.length === 6) {
+          try {
+            await loadRace(code);
+          } catch {
+            // still show blocked lobby
+          }
+        }
+      }
       if (!raceId) return;
       const stored = await loadSpaceRaceParticipant(raceId);
       if (stored) {
@@ -222,7 +264,7 @@ export default function AudienceSpaceRaceScreen() {
         setPhase('lobby');
       }
     })();
-  }, [raceId]);
+  }, [raceId, alreadyAttemptedOnDeviceParam]);
 
   useEffect(() => {
     if (liveParticipant && participant?.id) {
@@ -241,10 +283,6 @@ export default function AudienceSpaceRaceScreen() {
       saveSpaceRaceParticipant(updated);
     }
   }, [liveParticipant]);
-
-  useEffect(() => {
-    if (getRaceStatus(race) === 'completed') setRaceEnded(true);
-  }, [race]);
 
   const loadRace = async (code: string) => {
     const response = await getRaceByCode(code);
@@ -343,6 +381,16 @@ export default function AudienceSpaceRaceScreen() {
       if (joined.raceId) setRaceId(String(joined.raceId));
       setPhase('lobby');
     } catch (err) {
+      if (
+        err instanceof ApiError &&
+        (err.data as { code?: string } | null)?.code === 'ALREADY_ATTEMPTED'
+      ) {
+        const blockedRaceId = String((err.data as { raceId?: string } | null)?.raceId || raceId || '');
+        if (blockedRaceId) setRaceId(blockedRaceId);
+        setGuestBlockedOnDevice(true);
+        setPhase('lobby');
+        return;
+      }
       showAlert({
         type: 'error',
         title: 'Join failed',
@@ -370,14 +418,36 @@ export default function AudienceSpaceRaceScreen() {
 
   const onStartQuiz = async () => {
     if (!raceId || !participant?.id || !participant?.teamId) return;
+    if (isSpaceRaceEndedByTeacher(race) || audiencePhase === 'closed') {
+      setJoinBlockedByApi(true);
+      return;
+    }
+    if (isJoinWindowExpired(race, Date.now() + serverTimeOffset)) {
+      setJoinBlockedByApi(true);
+      return;
+    }
     setBusy(true);
     try {
+      const quizCountdown = Number(race?.settings?.countdown);
       const startRes: any = await startTeamQuiz(raceId, {
         teamId: Number(participant.teamId),
         participantId: String(participant.id),
+        studentName: String(participant.name || ''),
+        studentUid: loggedIn ? user?.uid || profile?.uid || undefined : undefined,
+        ...(Number.isFinite(quizCountdown) && quizCountdown > 0
+          ? { timerSeconds: Math.round(quizCountdown) }
+          : {}),
       });
+      const endTime = startRes?.endTime || startRes?.data?.endTime;
+      if (endTime && raceId) {
+        rememberSpaceRaceQuizEndTime(raceId, String(endTime));
+      }
+      if (startRes?.joinWindowExpired || startRes?.data?.joinWindowExpired) {
+        setJoinBlockedByApi(true);
+        return;
+      }
       if (startRes?.expired || startRes?.data?.expired) {
-        setQuizTimeExpired(true);
+        setJoinBlockedByApi(true);
         return;
       }
       router.push(
@@ -387,8 +457,19 @@ export default function AudienceSpaceRaceScreen() {
         ) as Href
       );
     } catch (err) {
+      if (isJoinWindowExpiredError(err)) {
+        setJoinBlockedByApi(true);
+        return;
+      }
+      if (
+        err instanceof ApiError &&
+        (err.data as { code?: string } | null)?.code === 'ALREADY_ATTEMPTED'
+      ) {
+        setGuestBlockedOnDevice(true);
+        return;
+      }
       if ((err as any)?.data?.expired) {
-        setQuizTimeExpired(true);
+        setJoinBlockedByApi(true);
         return;
       }
       showAlert({
@@ -478,6 +559,7 @@ export default function AudienceSpaceRaceScreen() {
         participantName={headerName}
         isLoggedIn={!showGuestChrome && loggedIn}
         onLogoPress={leave}
+        splitZones
       />
       <GuestProgressLoginBanner visible={showGuestChrome} />
       <ScrollView
@@ -500,11 +582,11 @@ export default function AudienceSpaceRaceScreen() {
             </View>
             <View style={styles.timeCol}>
               <Text style={styles.timeLabel}>Time left</Text>
-              <JoinDurationTimer race={race} />
+              <JoinDurationTimer race={race} serverTimeOffset={serverTimeOffset} />
             </View>
           </View>
 
-          {hasQuiz && !hasAttemptedQuiz && !quizTimeExpired && !raceEnded ? (
+          {hasQuiz && !hasAttemptedQuiz && audiencePhase === 'open' && Boolean(race) ? (
             <View style={styles.welcomeActions}>
               <Text style={styles.welcomeCopy}>
                 The quiz is ready — start it whenever you're set, and coordinate with your
@@ -519,40 +601,33 @@ export default function AudienceSpaceRaceScreen() {
             </View>
           ) : null}
 
-          {hasQuiz && !hasAttemptedQuiz && quizTimeExpired && !raceEnded ? (
+          {hasQuiz && !hasAttemptedQuiz && showWelcomeClosed ? (
             <View style={styles.welcomeActions}>
               <Text style={styles.welcomeCopy}>
-                Time&apos;s up — this quiz is closed and can no longer be opened or attempted.
+                {isSpaceRaceEndedByTeacher(race)
+                  ? 'The race has ended — this quiz is closed and can no longer be opened or attempted.'
+                  : "Time's up — this quiz is closed and can no longer be opened or attempted."}
               </Text>
-              <View style={styles.closedChip}>
+              <View
+                style={styles.closedChip}
+                accessibilityState={{ disabled: true }}
+                accessibilityLabel="Quiz Closed">
                 <Text style={styles.closedChipText}>Quiz Closed</Text>
               </View>
             </View>
           ) : null}
 
-          {hasAttemptedQuiz && !raceEnded ? (
+          {hasAttemptedQuiz ? (
             <View style={styles.welcomeActions}>
               <Text style={styles.welcomeCopy}>You have already attempted this quiz.</Text>
               <View style={styles.closedChip}>
                 <Text style={styles.closedChipText}>Quiz Completed</Text>
               </View>
-              <TouchableOpacity style={[styles.primary, styles.fullWidth]} onPress={leave}>
-                <Text style={styles.primaryLabel}>Back to Home</Text>
-              </TouchableOpacity>
-            </View>
-          ) : null}
-
-          {raceEnded ? (
-            <View style={styles.welcomeActions}>
-              <Text style={styles.welcomeCopy}>
-                This Space Race has been ended by the host. You can no longer submit answers.
-              </Text>
-              <View style={styles.closedChip}>
-                <Text style={styles.closedChipText}>Race Ended</Text>
-              </View>
-              <TouchableOpacity style={[styles.primary, styles.fullWidth]} onPress={leave}>
-                <Text style={styles.primaryLabel}>Back to Home</Text>
-              </TouchableOpacity>
+              <AudiencePostActivityHomeButton
+                onPress={leave}
+                style={[styles.primary, styles.fullWidth]}
+                labelStyle={styles.primaryLabel}
+              />
             </View>
           ) : null}
         </View>
@@ -561,6 +636,7 @@ export default function AudienceSpaceRaceScreen() {
         raceId={raceId}
         teamId={participant?.teamId}
         participant={participant}
+        forceClosed={joinWindowExpired || showWelcomeClosed}
       />
     </View>
   );

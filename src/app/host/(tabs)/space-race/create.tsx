@@ -22,7 +22,13 @@ import { KEYBOARD_SCROLL_PROPS, KeyboardSafeScreen } from '@/components/Keyboard
 import { COLORS, FONT_WEIGHTS, RADIUS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { useHostSessions } from '@/context/HostSessionContext';
-import { cleanErrorMessage, showActivityBlockedAlert, showLaunchFailureAlert } from '@/lib/activeActivity';
+import {
+  blockMobileLaunchIfBusy,
+  cleanErrorMessage,
+  showActivityBlockedAlert,
+  showLaunchFailureAlert,
+} from '@/lib/activeActivity';
+import { ANOTHER_ACTIVITY_LIVE_HINT, liveActivityBlocksLaunch } from '@/lib/liveHostActivity';
 import { apiRequest } from '@/lib/api';
 import {
   buildRacePayload,
@@ -60,7 +66,8 @@ const ICON_OPTIONS = [
 
 export default function CreateSpaceRaceScreen() {
   const { profile } = useAuth();
-  const { activeSession } = useHostSessions();
+  const { activeSession, liveActivity } = useHostSessions();
+  const raceLaunchBlocked = liveActivityBlocksLaunch(liveActivity);
   const [step, setStep] = useState(1);
   const [quizzes, setQuizzes] = useState<QuizOption[]>([]);
   const [loadingQuizzes, setLoadingQuizzes] = useState(true);
@@ -183,6 +190,7 @@ export default function CreateSpaceRaceScreen() {
       });
       return;
     }
+    if (blockMobileLaunchIfBusy(liveActivity, { type: 'spacerace' })) return;
     if (await hasActiveRace()) {
       showActivityBlockedAlert(activeSession?.currentActivity);
       return;
@@ -399,17 +407,22 @@ export default function CreateSpaceRaceScreen() {
             <Pressable
               style={({ pressed }) => [
                 styles.primary,
-                saving && styles.disabled,
-                pressed && styles.pressed,
+                (saving || raceLaunchBlocked) && styles.disabled,
+                pressed && !saving && !raceLaunchBlocked && styles.pressed,
               ]}
               onPress={onStart}
-              disabled={saving}
+              disabled={saving || raceLaunchBlocked}
               accessibilityRole="button"
-              accessibilityLabel="Launch">
+              accessibilityLabel={
+                raceLaunchBlocked ? 'Launch, another activity is live' : 'Launch'
+              }
+              accessibilityState={{ disabled: saving || raceLaunchBlocked }}>
               <Text style={styles.primaryLabel}>{saving ? 'Working…' : 'Launch'}</Text>
             </Pressable>
             {!activeSession?.sessionCode ? (
               <Text style={styles.launchHint}>Requires an active session</Text>
+            ) : raceLaunchBlocked ? (
+              <Text style={styles.launchHint}>{ANOTHER_ACTIVITY_LIVE_HINT}</Text>
             ) : null}
 
             <Pressable

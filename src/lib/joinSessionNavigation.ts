@@ -26,6 +26,26 @@ export function hrefToRouterTarget(href: string): Href {
   return { pathname, params } as Href;
 }
 
+/** Guest banner "Log in" — push Join Session on top of the activity (do not replace). */
+export async function pushJoinSessionFromBanner() {
+  let sessionCode = '';
+  let studentName = '';
+  try {
+    sessionCode = String((await AsyncStorage.getItem(SESSION_CODE_KEY)) || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '')
+      .slice(0, 6);
+    studentName = String((await AsyncStorage.getItem('studentName')) || '').trim();
+  } catch {
+    // keep empty; Join Session still opens
+  }
+  const qs = new URLSearchParams({ fromBanner: '1' });
+  if (sessionCode) qs.set('sessionCode', sessionCode);
+  if (studentName) qs.set('studentName', studentName);
+  router.push(hrefToRouterTarget(`/audience/join?${qs.toString()}`));
+}
+
 /**
  * Shared post-join navigation for guest (/join) and logged-in dashboard join.
  * Mirrors Web proceedWithSessionJoin destinations from POST /sessions/join
@@ -45,6 +65,7 @@ export type JoinSessionNavResult = {
   participantId?: string;
   needsTeamSelection?: boolean;
   alreadySubmitted?: boolean;
+  alreadyAttemptedOnDevice?: boolean;
 };
 
 const SESSION_CODE_KEY = 'sessionCode';
@@ -100,18 +121,19 @@ export function hrefForJoinedActivity(
     .toUpperCase();
 
   const submittedQs = result.alreadySubmitted ? '&alreadySubmitted=1' : '';
+  const attemptedQs = result.alreadyAttemptedOnDevice ? '&alreadyAttemptedOnDevice=1' : '';
   let href: string | null = null;
   if (result.activityType === 'quiz' && result.quizId) {
-    href = `/audience/quiz?quizId=${encodeURIComponent(result.quizId)}${submittedQs}`;
+    href = `/audience/quiz?quizId=${encodeURIComponent(result.quizId)}${submittedQs}${attemptedQs}`;
   } else if (result.activityType === 'liveChat' && code) {
     href = `/audience/live-chat?code=${encodeURIComponent(code)}`;
   } else if (result.activityType === 'exitTicket' && code) {
-    href = `/audience/exit-ticket?code=${encodeURIComponent(code)}${submittedQs}`;
+    href = `/audience/exit-ticket?code=${encodeURIComponent(code)}${submittedQs}${attemptedQs}`;
   } else if (result.activityType === 'spaceRace') {
     const raceQs = result.raceId
       ? `code=${encodeURIComponent(code)}&raceId=${encodeURIComponent(result.raceId)}`
       : `code=${encodeURIComponent(code)}`;
-    href = `/audience/space-race?${raceQs}`;
+    href = `/audience/space-race?${raceQs}${attemptedQs}`;
   }
   if (!href) return null;
   const withSource = appendActivityEntrySource(href, source);

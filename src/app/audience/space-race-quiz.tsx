@@ -1,10 +1,11 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { router, useLocalSearchParams, type Href } from 'expo-router';
+import { router, useLocalSearchParams, usePathname, type Href } from 'expo-router';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
-  Animated,
+  AppState,
+  Keyboard,
   ScrollView,
   StyleSheet,
   Text,
@@ -16,6 +17,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AudienceActivityHeader } from '@/components/Audience/AudienceActivityHeader';
+import { SpaceRaceQuizClosedCard } from '@/components/Audience/SpaceRaceQuizClosedCard';
 import { GuestProgressLoginBanner } from '@/components/Audience/GuestProgressLoginBanner';
 import { QuizQuestionNavButtons } from '@/components/Audience/QuizQuestionNavButtons';
 import {
@@ -49,12 +51,26 @@ import {
   submitRaceAnswer,
 } from '@/lib/hostSpaceRaces';
 import {
+  getQuizDeadlineMs,
+  isSpaceRaceQuizPath,
+  resolveSpaceRaceAudiencePhase,
+  SPACE_RACE_ENDED_BY_TEACHER_MESSAGE,
+  useAlignedNowMs,
+} from '@/lib/spaceRaceAudiencePhase';
+import { isJoinWindowExpired, isJoinWindowExpiredError } from '@/lib/spaceRaceJoinWindow';
+import {
   bootstrapSpaceRaceQuiz,
   normalizeQuestionList,
   readSpaceRaceQuizOptions,
   teamQuizCacheKey,
 } from '@/lib/spaceRaceAudienceQuiz';
-import { loadSpaceRaceParticipant, saveSpaceRaceParticipant } from '@/lib/spaceRaceSession';
+import {
+  loadSpaceRaceParticipant,
+  peekSpaceRaceQuizEndTime,
+  rememberSpaceRaceQuizEndTime,
+  saveSpaceRaceParticipant,
+  spaceRaceQuizEndTimeKey,
+} from '@/lib/spaceRaceSession';
 import {
   findLiveQuestionNodes,
   getRaceStatus,
@@ -66,6 +82,7 @@ import {
   teamNodeAnswer,
   teamScoreFromNode,
 } from '@/lib/spaceRaceTeams';
+import { reviewQuestionAnswer } from '@/lib/scoringUtils';
 import { nodesFromSnapshot, useLiveTeamSelectionMap } from '@/lib/useLiveTeamSelection';
 import { useRtdbValue } from '@/lib/useRtdb';
 
@@ -79,8 +96,16 @@ function isLoggedInAudience(
   return Boolean(uid && email);
 }
 
+function nodeWriteTime(node: any) {
+  if (!node || typeof node !== 'object') return 0;
+  const raw = node.selectedAt || node.updatedAt || node.submittedAt;
+  const parsed = raw ? Date.parse(String(raw)) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function pickQuestionLockNode(nodes: any[]) {
-  const submitted = nodes.filter(isSubmittedLockNode);
+  const objects = (nodes || []).filter((node) => node && typeof node === 'object');
+  const submitted = objects.filter(isSubmittedLockNode);
   if (submitted.length) {
     const withAnswer = submitted.find((node) => {
       const value = node?.selectedOption ?? node?.answer;
@@ -88,7 +113,19 @@ function pickQuestionLockNode(nodes: any[]) {
     });
     return withAnswer || submitted[0];
   }
-  return nodes.find((node) => node && typeof node === 'object') || null;
+  if (!objects.length) return null;
+  // Latest tap wins. Do not keep the first live node when a newer local/RTDB write exists.
+  let best = objects[0];
+  let bestTime = nodeWriteTime(best);
+  for (let i = 1; i < objects.length; i += 1) {
+    const node = objects[i];
+    const time = nodeWriteTime(node);
+    if (time >= bestTime) {
+      best = node;
+      bestTime = time;
+    }
+  }
+  return best;
 }
 
 /** Prefer a submitted node over a stale unsubmitted snapshot of the same question. */
@@ -124,18 +161,6 @@ function optionText(option: any) {
   return option?.text ?? option?.label ?? String(option ?? '');
 }
 
-function formatQuizCountdown(seconds: number | null) {
-  if (seconds == null || !Number.isFinite(seconds)) return '--:--';
-  const total = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(total / 3600);
-  const mins = Math.floor((total % 3600) / 60);
-  const secs = total % 60;
-  if (hours > 0) {
-    return `${hours}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-  }
-  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-}
-
 function remainingSecondsUntil(endIso: unknown, nowMs: number) {
   if (!endIso) return null;
   const end = new Date(String(endIso)).getTime();
@@ -148,42 +173,29 @@ function isQuizDurationLimited(seconds: unknown) {
   return Number.isFinite(n) && n > 0;
 }
 
-function QuizTimerPill({
-  seconds,
-  pulse,
-  compact,
-}: {
-  seconds: number;
-  pulse: Animated.Value;
-  compact?: boolean;
-}) {
-  const critical = seconds <= 10;
-  const warning = seconds <= 60 && !critical;
-  return (
-    <Animated.View
-      style={[
-        styles.timerPill,
-        warning && styles.timerPillWarn,
-        critical && styles.timerPillCrit,
-        critical && { opacity: pulse },
-      ]}>
-      <Ionicons
-        name="time-outline"
-        size={compact ? 13 : 14}
-        color={critical ? '#DC2626' : warning ? '#B45309' : COLORS.primary}
-      />
-      <Text
-        style={[
-          styles.timerPillText,
-          compact && styles.timerPillTextCompact,
-          warning && styles.timerPillTextWarn,
-          critical && styles.timerPillTextCrit,
-        ]}
-        numberOfLines={1}>
-        {formatQuizCountdown(seconds)}
-      </Text>
-    </Animated.View>
-  );
+/** Same candidate order as Web AudienceQuizAttempt.spaceRaceQuizDurationLimited. */
+function quizDurationSecondsFromSources(quizData: any, raceSettings: any) {
+  const candidates = [
+    raceSettings?.countdown,
+    quizData?.spaceRaceSettings?.countdown,
+    quizData?.launchSettings?.spaceRaceSettings?.countdown,
+    quizData?.launchSettings?.countdown,
+  ];
+  for (const value of candidates) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return Math.round(n);
+  }
+  return null;
+}
+
+function endIsoFromTeamTimer(teamTimer: any, durationSeconds: unknown) {
+  const liveEnd = teamTimer?.endTime;
+  if (liveEnd) return String(liveEnd);
+  const start = teamTimer?.quizStartedAt;
+  if (!start || !isQuizDurationLimited(durationSeconds)) return null;
+  const startMs = new Date(String(start)).getTime();
+  if (!Number.isFinite(startMs)) return null;
+  return new Date(startMs + Number(durationSeconds) * 1000).toISOString();
 }
 
 function firstRouteParam(value: string | string[] | undefined) {
@@ -200,6 +212,45 @@ function normalizeSharedTeamId(value: unknown) {
 
 function readLockAnswer(node: any) {
   return teamNodeAnswer(node);
+}
+
+function readApiIsCorrectFlag(response: unknown): boolean | null {
+  const body = response as any;
+  if (!body || typeof body !== 'object') return null;
+  if (typeof body.isCorrect === 'boolean') return body.isCorrect;
+  if (
+    body.data &&
+    typeof body.data === 'object' &&
+    !Array.isArray(body.data) &&
+    typeof body.data.isCorrect === 'boolean'
+  ) {
+    return body.data.isCorrect;
+  }
+  const message = String(body.message || body.data?.message || '');
+  if (message === 'Correct answer!') return true;
+  if (message === 'Incorrect answer') return false;
+  return null;
+}
+
+/**
+ * Score the value actually POSTed. Same option id/index/text / true-false rules as Web scoringUtils.
+ * Prefer a boolean from submit-answer; if it is missing or false while local scoring is true, keep true
+ * so a nested API body cannot toast "Incorrect" for a correct submit.
+ */
+function scoreOwnSubmittedAnswer(
+  question: any,
+  submittedValue: unknown,
+  quizType: unknown,
+  totalQuestions: number,
+  apiResponse: unknown
+) {
+  const localCorrect =
+    reviewQuestionAnswer(question, submittedValue, quizType, totalQuestions).isCorrect === true;
+  const apiFlag = readApiIsCorrectFlag(apiResponse);
+  if (apiFlag === true) return true;
+  if (localCorrect) return true;
+  if (apiFlag === false) return false;
+  return false;
 }
 
 function questionHasTeamAnswer(
@@ -243,6 +294,7 @@ function participantAnswerForQuestion(
 export default function AudienceSpaceRaceQuizScreen() {
   const { profile, user } = useAuth();
   const { source, leave } = useLeaveActivity({ headerBack: false });
+  const pathname = usePathname();
   const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
   const compactProgressRow = windowWidth < 390;
@@ -261,6 +313,7 @@ export default function AudienceSpaceRaceQuizScreen() {
   const [quizLoading, setQuizLoading] = useState(true);
   const [quizLoadError, setQuizLoadError] = useState('');
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
+  const [storedEndTime, setStoredEndTime] = useState<string | null>(null);
   const [quizTimeExpired, setQuizTimeExpired] = useState(false);
   const [raceEnded, setRaceEnded] = useState(false);
   const [redirectCountdown, setRedirectCountdown] = useState(10);
@@ -269,6 +322,9 @@ export default function AudienceSpaceRaceQuizScreen() {
   const [submittedQuestionKeys, setSubmittedQuestionKeys] = useState<Set<string>>(() => new Set());
   const loadGen = useRef(0);
   const submittedRef = useRef(false);
+  const feedbackShownForRef = useRef<Set<string>>(new Set());
+  /** Only the local Submit press may show Correct/Incorrect — never RTDB lock updates. */
+  const localSubmitInFlightRef = useRef(false);
 
   const loggedIn = isLoggedInAudience(profile, user);
   const participantId = participant?.id ? String(participant.id) : '';
@@ -344,9 +400,10 @@ export default function AudienceSpaceRaceQuizScreen() {
   const { value: serverTimeOffsetRaw } = useRtdbValue('.info/serverTimeOffset', {
     enabled: Boolean(raceId),
   });
-  const quizDurationSeconds = Number(race?.settings?.countdown);
+  const serverTimeOffset = Number(serverTimeOffsetRaw) || 0;
+  const alignedNowMs = useAlignedNowMs(serverTimeOffset, Boolean(raceId));
+  const quizDurationSeconds = quizDurationSecondsFromSources(quiz, race?.settings);
   const quizDurationLimited = isQuizDurationLimited(quizDurationSeconds);
-  const quizTimerPulse = useRef(new Animated.Value(1)).current;
   const participantAnswerRow = participantAnswerForQuestion(
     liveParticipantData?.answers,
     question,
@@ -354,14 +411,17 @@ export default function AudienceSpaceRaceQuizScreen() {
     questionId
   );
   const lockNode = useMemo(() => {
-    const liveNodes = [...findLiveQuestionNodes(liveTeamSelections, question, index)];
-    if (submissionState && typeof submissionState === 'object') {
-      liveNodes.push(submissionState);
-    }
+    // Local optimistic nodes first so a just-tapped option wins timestamp ties
+    // and is not overwritten by a stale live snapshot of a teammate's pick.
+    const liveNodes: any[] = [];
+    if (questionId && localLock[questionId]) liveNodes.push(localLock[questionId]);
     liveQuestionKeys.forEach((id) => {
       if (localLock[id]) liveNodes.push(localLock[id]);
     });
-    if (questionId && localLock[questionId]) liveNodes.push(localLock[questionId]);
+    liveNodes.push(...findLiveQuestionNodes(liveTeamSelections, question, index));
+    if (submissionState && typeof submissionState === 'object') {
+      liveNodes.push(submissionState);
+    }
     if (participantAnswerRow) {
       liveNodes.push({
         selectedOption: participantAnswerRow.answer ?? participantAnswerRow.selectedOption,
@@ -435,6 +495,10 @@ export default function AudienceSpaceRaceQuizScreen() {
   }, [raceId]);
 
   useEffect(() => {
+    feedbackShownForRef.current = new Set();
+  }, [raceId]);
+
+  useEffect(() => {
     if (!liveParticipantData || !participantId) return;
     setParticipant((prev: any) => {
       const base = prev || { id: participantId };
@@ -460,6 +524,14 @@ export default function AudienceSpaceRaceQuizScreen() {
       Object.entries(liveTeamSelections).forEach(([nodeKey, nodeVal]: [string, any]) => {
         if (!nodeKey.startsWith('question_') || !nodeVal) return;
         const id = nodeKey.slice('question_'.length);
+        const localNode = localLock[id];
+        if (
+          localNode &&
+          !isSubmittedLockNode(nodeVal) &&
+          nodeWriteTime(localNode) > nodeWriteTime(nodeVal)
+        ) {
+          return;
+        }
         const value = nodeVal.selectedOption ?? nodeVal.answer;
         if (value == null || String(value).trim() === '') return;
         if (String(next[id] ?? '') !== String(value)) {
@@ -469,11 +541,23 @@ export default function AudienceSpaceRaceQuizScreen() {
       });
       return changed ? next : prev;
     });
-  }, [liveTeamSelections]);
+  }, [liveTeamSelections, localLock]);
 
   useEffect(() => {
     if (getRaceStatus(race) === 'completed') setRaceEnded(true);
   }, [race]);
+
+  const quizDeadlineMs =
+    getQuizDeadlineMs(teamTimer?.endTime) ??
+    getQuizDeadlineMs(storedEndTime) ??
+    getQuizDeadlineMs(raceId ? peekSpaceRaceQuizEndTime(raceId) : null);
+  const audiencePhase = resolveSpaceRaceAudiencePhase({
+    completed: finished,
+    insideQuiz: isSpaceRaceQuizPath(pathname),
+    race,
+    nowMs: alignedNowMs,
+    quizEndMs: quizDeadlineMs,
+  });
 
   useEffect(() => {
     if (!raceId) {
@@ -544,16 +628,39 @@ export default function AudienceSpaceRaceQuizScreen() {
   }, [raceId, paramTeamId]);
 
   useEffect(() => {
+    if (!raceId) return;
+    const peeked = peekSpaceRaceQuizEndTime(raceId);
+    if (peeked) setStoredEndTime((prev) => prev || peeked);
+    let cancelled = false;
+    AsyncStorage.getItem(spaceRaceQuizEndTimeKey(raceId))
+      .then((value) => {
+        if (!cancelled && value) setStoredEndTime((prev) => prev || value);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [raceId]);
+
+  useEffect(() => {
+    const endIso = endIsoFromTeamTimer(teamTimer, quizDurationSeconds);
+    if (!raceId || !endIso) return;
+    setStoredEndTime(endIso);
+    rememberSpaceRaceQuizEndTime(raceId, endIso);
+  }, [raceId, teamTimer, quizDurationSeconds]);
+
+  useEffect(() => {
     if (finished) return undefined;
-    const endIso = teamTimer?.endTime;
-    const started = Boolean(teamTimer?.quizStartedAt);
-    if (!quizDurationLimited || !started || !endIso) {
+    const endIso =
+      endIsoFromTeamTimer(teamTimer, quizDurationSeconds) ||
+      storedEndTime ||
+      (raceId ? peekSpaceRaceQuizEndTime(raceId) : null);
+    if (!quizDurationLimited || !endIso) {
       setTimeLeft(null);
       return undefined;
     }
     const tick = () => {
-      const now = Date.now() + (Number(serverTimeOffsetRaw) || 0);
-      const remaining = remainingSecondsUntil(endIso, now);
+      const remaining = remainingSecondsUntil(endIso, alignedNowMs);
       if (remaining == null) {
         setTimeLeft(null);
         return;
@@ -563,32 +670,42 @@ export default function AudienceSpaceRaceQuizScreen() {
     };
     tick();
     const interval = setInterval(tick, 1000);
-    return () => clearInterval(interval);
+    const appSub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') tick();
+    });
+    return () => {
+      clearInterval(interval);
+      appSub.remove();
+    };
   }, [
-    teamTimer?.endTime,
-    teamTimer?.quizStartedAt,
+    teamTimer,
+    storedEndTime,
+    quizDurationSeconds,
     quizDurationLimited,
     serverTimeOffsetRaw,
+    alignedNowMs,
     finished,
+    raceId,
   ]);
 
   useEffect(() => {
-    if (timeLeft == null || timeLeft > 10) {
-      quizTimerPulse.setValue(1);
-      return undefined;
-    }
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(quizTimerPulse, { toValue: 0.55, duration: 550, useNativeDriver: true }),
-        Animated.timing(quizTimerPulse, { toValue: 1, duration: 550, useNativeDriver: true }),
-      ])
-    );
-    loop.start();
-    return () => {
-      loop.stop();
-      quizTimerPulse.setValue(1);
+    if (finished) return undefined;
+    const tick = () => {
+      if (isJoinWindowExpired(race, alignedNowMs)) {
+        setQuizTimeExpired(true);
+        Keyboard.dismiss();
+      }
     };
-  }, [timeLeft, quizTimerPulse]);
+    tick();
+    const interval = setInterval(tick, 1000);
+    const appSub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') tick();
+    });
+    return () => {
+      clearInterval(interval);
+      appSub.remove();
+    };
+  }, [race, alignedNowMs, finished]);
 
   useEffect(() => {
     const currentLive = readLockAnswer(lockNode);
@@ -669,44 +786,19 @@ export default function AudienceSpaceRaceQuizScreen() {
   const quizClockExpired =
     quizDurationLimited &&
     Boolean(teamTimer?.quizStartedAt && teamTimer?.endTime) &&
-    (remainingSecondsUntil(
-      teamTimer?.endTime,
-      Date.now() + (Number(serverTimeOffsetRaw) || 0)
-    ) ?? 1) <= 0;
-  const timerBlocksSubmit = quizTimeExpired || quizClockExpired || raceEnded;
+    (remainingSecondsUntil(teamTimer?.endTime, alignedNowMs) ?? 1) <= 0;
+  const timerBlocksSubmit =
+    quizTimeExpired ||
+    quizClockExpired ||
+    raceEnded ||
+    audiencePhase === 'times_up' ||
+    audiencePhase === 'race_ended';
   const quizOptions = useMemo(
     () => readSpaceRaceQuizOptions(quiz, race?.settings),
     [quiz, race?.settings]
   );
   const showFinalScore = quizOptions.showFinalScore;
   const showQuestionFeedback = quizOptions.showQuestionFeedback;
-  const prevSubmittedRef = useRef<boolean | null>(null);
-
-  useEffect(() => {
-    prevSubmittedRef.current = null;
-  }, [index, questionId]);
-
-  useEffect(() => {
-    const wasSubmitted = prevSubmittedRef.current;
-    prevSubmittedRef.current = submitted;
-    if (wasSubmitted === null) return;
-    if (!showQuestionFeedback || !submitted || wasSubmitted) return;
-    const by = String(lockNode?.submittedBy || lockNode?.selectedBy || '');
-    if (by && participantId && by === participantId) return;
-    const isCorrect = lockNode?.isCorrect === true;
-    showToast({
-      type: 'info',
-      title: isCorrect ? '✅ Correct answer!' : '❌ Incorrect answer',
-      icon: 'checkmark-circle',
-    });
-  }, [
-    submitted,
-    showQuestionFeedback,
-    lockNode?.isCorrect,
-    lockNode?.submittedBy,
-    lockNode?.selectedBy,
-    participantId,
-  ]);
 
   const optionList = () => {
     if (!question) return [] as string[];
@@ -779,12 +871,10 @@ export default function AudienceSpaceRaceQuizScreen() {
       selectedOption: value,
       selectedBy: participantId,
       selectedByName: memberName,
+      selectedAt: new Date().toISOString(),
       submitted: false,
     };
-    setLocalLock((prev) => {
-      if (isSubmittedLockNode(prev[questionId])) return prev;
-      return { ...prev, [questionId]: { ...optimisticSelection } };
-    });
+    applyLocalLock(questionId, optimisticSelection);
     try {
       await setTeamSelection(raceId, {
         teamId: normalizedTeamId,
@@ -795,6 +885,11 @@ export default function AudienceSpaceRaceQuizScreen() {
         senderName: memberName,
       });
     } catch (err) {
+      if (isJoinWindowExpiredError(err) || (err as any)?.data?.expired) {
+        setQuizTimeExpired(true);
+        Keyboard.dismiss();
+        return;
+      }
       const errMsg = String((err as any)?.data?.error || (err as Error)?.message || '');
       if (errMsg.toLowerCase().includes('already submitted')) {
         markQuestionSubmitted(questionId, { submitted: true, selectedOption: value });
@@ -837,6 +932,10 @@ export default function AudienceSpaceRaceQuizScreen() {
       return;
     }
     if (submitted) return;
+    const lockerId = String(
+      lockNode?.submittedBy || submissionState?.submittedBy || ''
+    );
+    if (lockerId && lockerId !== String(participantId)) return;
     const answerToSend =
       (displaySelectedOption != null && String(displaySelectedOption).trim() !== ''
         ? displaySelectedOption
@@ -851,6 +950,12 @@ export default function AudienceSpaceRaceQuizScreen() {
       return;
     }
 
+    const questionSnapshot = question;
+    const valueSnapshot = answerToSend;
+    const quizTypeSnapshot = quiz?.type;
+    const totalQuestionsSnapshot = questions.length;
+    const wantQuestionFeedback = showQuestionFeedback;
+
     const submittedSelection = {
       selectedOption: answerToSend,
       submitted: true,
@@ -858,6 +963,7 @@ export default function AudienceSpaceRaceQuizScreen() {
       submittedByName: memberName,
       selectedByName: memberName,
     };
+    localSubmitInFlightRef.current = true;
     markQuestionSubmitted(questionId, submittedSelection);
 
     setBusy(true);
@@ -865,13 +971,14 @@ export default function AudienceSpaceRaceQuizScreen() {
       const response = await submitRaceAnswer(raceId, {
         teamId: normalizedTeamId,
         questionId,
-        answer: answerToSend,
+        answer: valueSnapshot,
         participantId,
         participantName: memberName,
         questionIndex: index,
       });
-      if ((response as any)?.expired) {
+      if ((response as any)?.joinWindowExpired || (response as any)?.expired) {
         setQuizTimeExpired(true);
+        Keyboard.dismiss();
         return;
       }
       if (!response.success && response.error) {
@@ -888,26 +995,36 @@ export default function AudienceSpaceRaceQuizScreen() {
           }
         }, 1000);
       }
-      if (showQuestionFeedback) {
-        const payload = (response as any)?.data ?? response;
-        const isCorrect = payload?.isCorrect === true;
-        showToast({
-          type: 'info',
-          title: isCorrect ? '✅ Correct answer!' : '❌ Incorrect answer',
-          icon: 'checkmark-circle',
-        });
-      } else {
-        showToast({
-          type: 'success',
-          title: 'Answer submitted for your team.',
-          icon: 'checkmark-circle',
-        });
+      const feedbackKey = questionId || String(index);
+      const alreadyToasted = feedbackShownForRef.current.has(feedbackKey);
+      if (!alreadyToasted && localSubmitInFlightRef.current) {
+        feedbackShownForRef.current.add(feedbackKey);
+        if (wantQuestionFeedback) {
+          const isCorrect = scoreOwnSubmittedAnswer(
+            questionSnapshot,
+            valueSnapshot,
+            quizTypeSnapshot,
+            totalQuestionsSnapshot,
+            response
+          );
+          showToast({
+            type: 'info',
+            title: isCorrect ? '✅ Correct answer!' : '❌ Incorrect answer',
+            icon: 'checkmark-circle',
+          });
+        } else {
+          showToast({
+            type: 'success',
+            title: 'Answer submitted for your team.',
+            icon: 'checkmark-circle',
+          });
+        }
       }
       try {
         await setTeamSelection(raceId, {
           teamId: normalizedTeamId,
           questionId,
-          selectedOption: answerToSend,
+          selectedOption: valueSnapshot,
           participantId,
           participantName: memberName,
           senderName: memberName,
@@ -919,8 +1036,9 @@ export default function AudienceSpaceRaceQuizScreen() {
       }
     } catch (err) {
       const data = (err as any)?.data as { expired?: boolean; error?: string } | undefined;
-      if (data?.expired) {
+      if (isJoinWindowExpiredError(err) || data?.expired) {
         setQuizTimeExpired(true);
+        Keyboard.dismiss();
         return;
       }
       const errMsg = String(data?.error || (err as Error)?.message || '');
@@ -945,11 +1063,12 @@ export default function AudienceSpaceRaceQuizScreen() {
         icon: 'alert-circle',
       });
     } finally {
+      localSubmitInFlightRef.current = false;
       setBusy(false);
     }
   };
 
-  const chrome = (
+  const chrome = (timerSeconds: number | null = null) => (
     <>
       <AudienceActivityHeader
         title={headerTitle}
@@ -957,18 +1076,27 @@ export default function AudienceSpaceRaceQuizScreen() {
         participantName={headerName}
         isLoggedIn={!showGuestChrome && loggedIn}
         onLogoPress={leave}
+        timerSeconds={timerSeconds}
+        splitZones
       />
       <GuestProgressLoginBanner visible={showGuestChrome} />
     </>
   );
 
   const fab = (
-    <SpaceRaceTeamChatFab raceId={raceId} teamId={teamId} participant={participant} />
+    <SpaceRaceTeamChatFab
+      raceId={raceId}
+      teamId={teamId}
+      participant={participant}
+      forceClosed={
+        quizTimeExpired || audiencePhase === 'times_up' || audiencePhase === 'race_ended'
+      }
+    />
   );
 
-  const resultShell = (body: ReactNode) => (
+  const resultShell = (body: ReactNode, timerSeconds: number | null = null) => (
     <View style={styles.screen}>
-      {chrome}
+      {chrome(timerSeconds)}
       <ScrollView
         contentContainerStyle={[
           styles.centeredScroll,
@@ -980,45 +1108,31 @@ export default function AudienceSpaceRaceQuizScreen() {
     </View>
   );
 
+  if ((audiencePhase === 'race_ended' || raceEnded) && !finished) {
+    return resultShell(
+      <View style={styles.resultCard}>
+        <Ionicons name="alert-circle" size={56} color={COLORS.inkSecondary} />
+        <Text style={styles.heading}>Quiz Error</Text>
+        <Text style={styles.hint}>{SPACE_RACE_ENDED_BY_TEACHER_MESSAGE}</Text>
+        <TouchableOpacity style={styles.primary} onPress={goToLobby}>
+          <Text style={styles.primaryLabel}>Back to Race</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  if (audiencePhase === 'times_up' && !finished && isSpaceRaceQuizPath(pathname)) {
+    return resultShell(<SpaceRaceQuizClosedCard onBack={goToLobby} />, 0);
+  }
+
   if (quizLoading) {
     return (
       <View style={styles.screen}>
-        {chrome}
+        {chrome()}
         <View style={styles.centered}>
           <ActivityIndicator color={COLORS.primary} />
           <Text style={styles.hint}>Loading quiz...</Text>
         </View>
-      </View>
-    );
-  }
-
-  if (raceEnded && !finished) {
-    return resultShell(
-      <View style={styles.resultCard}>
-        <Ionicons name="flag" size={56} color={COLORS.primary} />
-        <Text style={styles.heading}>Race ended</Text>
-        <Text style={styles.hint}>
-          This Space Race has been ended by the host. You can no longer submit answers.
-        </Text>
-        <TouchableOpacity style={styles.primary} onPress={goToLobby}>
-          <Text style={styles.primaryLabel}>Back to Race</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
-  if (quizTimeExpired && !finished) {
-    return resultShell(
-      <View style={styles.resultCard}>
-        <Ionicons name="time-outline" size={56} color="#DC2626" />
-        <Text style={styles.heading}>Time's Up</Text>
-        <Text style={styles.hint}>
-          This quiz is closed. Your team&apos;s time has ended, so it can no longer be opened or
-          attempted.
-        </Text>
-        <TouchableOpacity style={styles.primary} onPress={goToLobby}>
-          <Text style={styles.primaryLabel}>Back to Race</Text>
-        </TouchableOpacity>
       </View>
     );
   }
@@ -1162,7 +1276,9 @@ export default function AudienceSpaceRaceQuizScreen() {
 
   return (
     <KeyboardSafeScreen scroll={false} style={styles.screen}>
-      {chrome}
+      {chrome(
+        audiencePhase === 'times_up' || audiencePhase === 'race_ended' ? 0 : timeLeft
+      )}
       <ScrollView
         {...KEYBOARD_SCROLL_PROPS}
         contentContainerStyle={[
@@ -1179,11 +1295,6 @@ export default function AudienceSpaceRaceQuizScreen() {
               numberOfLines={1}>
               Question {index + 1} of {questions.length}
             </Text>
-            <View style={styles.timerSlot} pointerEvents="none">
-              {timeLeft != null ? (
-                <QuizTimerPill seconds={timeLeft} pulse={quizTimerPulse} compact={compactProgressRow} />
-              ) : null}
-            </View>
             <Text
               style={[styles.progressPct, compactProgressRow && styles.progressPctCompact]}
               numberOfLines={1}>
@@ -1246,7 +1357,7 @@ export default function AudienceSpaceRaceQuizScreen() {
                     selected && styles.optionOn,
                     submitted && styles.optionLocked,
                   ]}
-                  disabled={submitted || timerBlocksSubmit}
+                  disabled={submitted}
                   onPress={() => onSelect(option)}>
                   <View style={[styles.radioOuter, selected && styles.radioOuterOn]}>
                     {selected ? <View style={styles.radioInner} /> : null}
@@ -1280,10 +1391,14 @@ export default function AudienceSpaceRaceQuizScreen() {
           ) : null}
 
           <QuizQuestionNavButtons
-            previousDisabled={index === 0}
-            onPrevious={() => setIndex((prev) => Math.max(0, prev - 1))}
+            previousDisabled={index === 0 || timerBlocksSubmit}
+            onPrevious={() => {
+              if (timerBlocksSubmit) return;
+              setIndex((prev) => Math.max(0, prev - 1));
+            }}
             hidePrimary={!submitted}
             primaryLabel={index === questions.length - 1 ? 'Finish' : 'Next'}
+            primaryDisabled={timerBlocksSubmit}
             onPrimary={
               index === questions.length - 1 ? finishQuiz : () => setIndex((prev) => prev + 1)
             }
@@ -1321,35 +1436,6 @@ const styles = StyleSheet.create({
     gap: SPACING[3],
   },
   content: { padding: SPACING[4], gap: SPACING[3] },
-  timerPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    borderRadius: 999,
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    backgroundColor: COLORS.blush,
-    justifyContent: 'center',
-    flexShrink: 0,
-  },
-  timerPillWarn: { backgroundColor: '#FEF3C7' },
-  timerPillCrit: { backgroundColor: '#FEE2E2' },
-  timerPillText: {
-    color: COLORS.primary,
-    fontSize: 13,
-    fontWeight: FONT_WEIGHTS.medium,
-    fontVariant: ['tabular-nums'],
-  },
-  timerPillTextCompact: { fontSize: 12 },
-  timerPillTextWarn: { color: '#B45309' },
-  timerPillTextCrit: { color: '#DC2626' },
-  timerSlot: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minWidth: 0,
-    paddingHorizontal: 2,
-  },
   questionCard: {
     backgroundColor: COLORS.white,
     borderRadius: RADIUS.md,

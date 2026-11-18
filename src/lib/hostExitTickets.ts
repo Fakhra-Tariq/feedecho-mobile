@@ -1,4 +1,6 @@
 import { apiRequest } from '@/lib/api';
+import { notifyHostDataMutated } from '@/lib/hostDataSync';
+import { guestDevicePayload } from '@/lib/audienceDeviceId';
 
 export const LIKERT_OPTIONS = [
   'Strongly Agree',
@@ -156,6 +158,7 @@ export async function createExitTicket(payload: Record<string, unknown>) {
   if (!response.success || !response.data) {
     throw new Error(response.error || 'Failed to create exit ticket');
   }
+  notifyHostDataMutated();
   return response.data;
 }
 
@@ -167,6 +170,7 @@ export async function updateExitTicket(id: string, payload: Record<string, unkno
   if (!response.success || !response.data) {
     throw new Error(response.error || 'Failed to update exit ticket');
   }
+  notifyHostDataMutated();
   return response.data;
 }
 
@@ -175,6 +179,7 @@ export async function deleteExitTicket(id: string) {
     method: 'DELETE',
   });
   if (!response.success) throw new Error(response.error || 'Failed to delete exit ticket');
+  notifyHostDataMutated();
 }
 
 export async function startExitTicket(id: string) {
@@ -185,6 +190,7 @@ export async function startExitTicket(id: string) {
   if (!response.success || !response.data) {
     throw new Error(response.error || 'Failed to launch exit ticket');
   }
+  notifyHostDataMutated();
   return response.data;
 }
 
@@ -196,6 +202,7 @@ export async function endExitTicket(id: string) {
   if (!response.success || !response.data) {
     throw new Error(response.error || 'Failed to end exit ticket');
   }
+  notifyHostDataMutated();
   return response.data;
 }
 
@@ -224,11 +231,44 @@ export async function getExitTicketResponses(id: string) {
   return normalizeExitResponsesPayload(response.data);
 }
 
+/** Same as Web `DELETE /exit-tickets/:id/responses` — host-only on the API. */
+export async function clearExitTicketResponses(id: string) {
+  const response = await apiRequest<{ success: boolean; error?: string; message?: string }>(
+    `/exit-tickets/${id}/responses`,
+    { method: 'DELETE' }
+  );
+  if (!response.success) {
+    throw new Error(response.error || 'Failed to clear responses');
+  }
+  return response;
+}
+
 export async function getExitTicketByCode(joinCode: string) {
   return apiRequest<{ success: boolean; data: ExitTicket; error?: string }>(
     `/exit-tickets/code/${encodeURIComponent(joinCode)}`,
     { auth: false }
   );
+}
+
+export async function startExitTicketAttempt(
+  id: string,
+  data: {
+    studentName: string;
+    studentUid?: string;
+    studentEmail?: string;
+  }
+) {
+  const device = data.studentUid ? {} : await guestDevicePayload();
+  return apiRequest<{
+    success?: boolean;
+    resumed?: boolean;
+    attemptId?: string;
+    error?: string;
+  }>(`/exit-tickets/${id}/start-attempt`, {
+    method: 'POST',
+    auth: false,
+    body: { ...data, ...device },
+  });
 }
 
 export async function submitExitTicketResponse(
@@ -239,11 +279,14 @@ export async function submitExitTicketResponse(
     answers: { questionIndex: number; answer: string }[];
     studentUid?: string;
     studentEmail?: string;
+    /** Same snapshot field Web writes on exit_responses. */
+    ticketTitle?: string;
   }
 ) {
+  const device = responseData.studentUid ? {} : await guestDevicePayload();
   return apiRequest<{ success: boolean; error?: string }>(`/exit-tickets/${id}/respond`, {
     method: 'POST',
-    body: responseData,
+    body: { ...responseData, ...device },
     auth: false,
   });
 }

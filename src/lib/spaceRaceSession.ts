@@ -39,3 +39,22 @@ export async function loadSpaceRaceParticipant(expectedRaceId: string | null = n
 export async function clearSpaceRaceParticipant() {
   await AsyncStorage.removeItem(PARTICIPANT_KEY);
 }
+
+const quizEndTimeMem = new Map<string, string>();
+
+export function spaceRaceQuizEndTimeKey(raceId: string) {
+  return `spaceRaceEndTime:${raceId}`;
+}
+
+/** In-memory + AsyncStorage so the question-screen header does not wait on RTDB. */
+export function rememberSpaceRaceQuizEndTime(raceId: string, iso: string) {
+  const id = String(raceId || '').trim();
+  const end = String(iso || '').trim();
+  if (!id || !end) return;
+  quizEndTimeMem.set(id, end);
+  void AsyncStorage.setItem(spaceRaceQuizEndTimeKey(id), end);
+}
+
+export function peekSpaceRaceQuizEndTime(raceId: string) {
+  return quizEndTimeMem.get(String(raceId || '').trim()) || null;
+}

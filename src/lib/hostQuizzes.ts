@@ -1,13 +1,17 @@
 import {
+  equalTo,
   onValue,
+  orderByChild,
+  query,
   ref,
   update,
 } from 'firebase/database';
 
 import { db } from '../../firebaseConfig';
 import { apiRequest } from '@/lib/api';
+import { notifyHostDataMutated } from '@/lib/hostDataSync';
 import { normalizeQuizTypeLabel, type QuizTypeLabel } from '@/lib/aiGeneratedQuiz';
-import { isQuizCurrentlyActive, isQuizExpired } from '@/lib/quizExpiry';
+import { isQuizCurrentlyActive, isQuizExpired, isQuizLiveLikeLaunchGuard } from '@/lib/quizExpiry';
 
 export type HostQuiz = {
   id: string;
@@ -40,6 +44,19 @@ export function parseOptionalMinutes(value: number | string | null | undefined) 
 
 /** Quizzes just POSTed/PUTted this session — GET /quizzes can lag the createdBy index. */
 const savedQuizCache = new Map<string, HostQuiz>();
+const savedQuizListeners = new Set<(rows: HostQuiz[]) => void>();
+
+function emitSavedQuizCache() {
+  const rows = Array.from(savedQuizCache.values());
+  savedQuizListeners.forEach((fn) => fn(rows));
+}
+
+export function subscribeSavedQuizCache(onChange: (rows: HostQuiz[]) => void) {
+  savedQuizListeners.add(onChange);
+  return () => {
+    savedQuizListeners.delete(onChange);
+  };
+}
 
 function asHostQuiz(quiz: HostQuiz, fallbackId = ''): HostQuiz {
   return {
@@ -52,10 +69,63 @@ function asHostQuiz(quiz: HostQuiz, fallbackId = ''): HostQuiz {
 export function rememberSavedQuiz(quiz: HostQuiz | null | undefined) {
   if (!quiz?.id) return;
   savedQuizCache.set(String(quiz.id), asHostQuiz(quiz));
+  emitSavedQuizCache();
 }
 
 export function forgetSavedQuiz(id: string) {
   savedQuizCache.delete(id);
+  emitSavedQuizCache();
+}
+
+function quizStampMs(quiz: HostQuiz) {
+  const updated = Date.parse(String(quiz.updatedAt || '')) || 0;
+  const created = Date.parse(String(quiz.createdAt || '')) || 0;
+  return Math.max(updated, created);
+}
+
+/**
+ * Prefer launched over a stale Ready copy of the same id (Library used to
+ * merge `prev` last, which hid AI/editor launches). Finished/newer stamps
+ * still beat launched so End is not undone by a lagging snapshot.
+ */
+export function pickCanonicalQuiz(a: HostQuiz, b: HostQuiz): HostQuiz {
+  const id = String(b.id || a.id);
+  let aBucket: ReturnType<typeof quizBucket> = 'ready';
+  let bBucket: ReturnType<typeof quizBucket> = 'ready';
+  try {
+    aBucket = quizBucket(a);
+  } catch {
+    aBucket = 'ready';
+  }
+  try {
+    bBucket = quizBucket(b);
+  } catch {
+    bBucket = 'ready';
+  }
+  const aTs = quizStampMs(a);
+  const bTs = quizStampMs(b);
+
+  if (aBucket === 'finished' && bBucket === 'launched' && aTs >= bTs) {
+    return { ...b, ...a, id };
+  }
+  if (bBucket === 'finished' && aBucket === 'launched' && bTs >= aTs) {
+    return { ...a, ...b, id };
+  }
+  // Never let a Ready list/API row hide a live launch. GET /quizzes can lag
+  // (default limit 50, index delay) while POST /launch still has launched:true.
+  if (aBucket === 'launched' && bBucket === 'ready') {
+    return { ...b, ...a, id };
+  }
+  if (bBucket === 'launched' && aBucket === 'ready') {
+    return { ...a, ...b, id };
+  }
+  if (aBucket === 'finished' && bBucket === 'ready') {
+    return { ...b, ...a, id };
+  }
+  if (bBucket === 'finished' && aBucket === 'ready') {
+    return { ...a, ...b, id };
+  }
+  return bTs >= aTs ? { ...a, ...b, id } : { ...b, ...a, id };
 }
 
 export function mergeTeacherQuizLists(...lists: HostQuiz[][]) {
@@ -66,7 +136,7 @@ export function mergeTeacherQuizLists(...lists: HostQuiz[][]) {
     if (!id) return;
     const next = asHostQuiz(quiz, id);
     const prev = map.get(id);
-    map.set(id, prev ? { ...prev, ...next, id } : next);
+    map.set(id, prev ? pickCanonicalQuiz(prev, next) : next);
   });
   return Array.from(map.values())
     .filter((quiz) => {
@@ -81,20 +151,29 @@ export function mergeTeacherQuizLists(...lists: HostQuiz[][]) {
 export function subscribeTeacherQuizzes(
   teacherId: string,
   onChange: (quizzes: HostQuiz[]) => void,
-  onError?: (error: Error) => void
+  onError?: (error: Error) => void,
+  ownerIds?: Iterable<string>
 ) {
-  // Full-tree listen + client filter (same pattern as working Exit Tickets).
-  // Indexed orderByChild('createdBy') often fails silently under client rules.
-  const quizzesRef = ref(db, 'quizzes');
+  const uid = String(teacherId || '').trim();
+  const owners = new Set(
+    [uid, ...(ownerIds ? Array.from(ownerIds) : [])]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  );
+  // Same query Web HostRealtimeSync / HostReports use. A full-tree listen on
+  // /quizzes is permission_denied by deployed rules.
+  const quizzesQuery = uid
+    ? query(ref(db, 'quizzes'), orderByChild('createdBy'), equalTo(uid))
+    : ref(db, 'quizzes');
   return onValue(
-    quizzesRef,
+    quizzesQuery,
     (snap) => {
       const rows: HostQuiz[] = [];
       if (snap.exists()) {
-        Object.entries(snap.val() || {}).forEach(([id, value]) => {
+        Object.entries({ ...(snap.val() || {}) }).forEach(([id, value]) => {
           if (!value || typeof value !== 'object') return;
           const quiz = value as HostQuiz;
-          if (String(quiz.createdBy || '').trim() !== String(teacherId || '').trim()) return;
+          if (owners.size && !owners.has(String(quiz.createdBy || '').trim())) return;
           if (quiz.deletedAt) return;
           const status = String(quiz.status || '').toLowerCase();
           if (status === 'ended') return;
@@ -113,7 +192,9 @@ export function subscribeTeacherQuizzes(
 
 /** Same source Web Quiz Library uses: GET /api/quizzes (Admin already filters by token uid). */
 export async function listTeacherQuizzes(_teacherId?: string) {
-  const response = await apiRequest<{ success?: boolean; data?: HostQuiz[] }>('/quizzes');
+  // limit=0 disables the server default slice of 50 so a live quiz cannot
+  // fall off the list while the launch guard still scans every quiz.
+  const response = await apiRequest<{ success?: boolean; data?: HostQuiz[] }>('/quizzes?limit=0');
   const rows = Array.isArray(response.data) ? response.data : [];
   return mergeTeacherQuizLists(rows, Array.from(savedQuizCache.values()));
 }
@@ -130,6 +211,7 @@ export async function createQuiz(payload: Record<string, unknown>) {
     throw new Error('Failed to create quiz');
   }
   rememberSavedQuiz(response.data);
+  notifyHostDataMutated();
   return response.data;
 }
 
@@ -142,6 +224,7 @@ export async function updateQuiz(id: string, payload: Record<string, unknown>) {
     throw new Error('Failed to update quiz');
   }
   rememberSavedQuiz(response.data);
+  notifyHostDataMutated();
   return response.data;
 }
 
@@ -158,6 +241,16 @@ export async function finishQuiz(id: string) {
     method: 'POST',
   });
   if (!response.success) throw new Error('Failed to finish quiz');
+  const cached = savedQuizCache.get(String(id));
+  if (cached) {
+    rememberSavedQuiz({
+      ...cached,
+      launched: false,
+      status: 'ready',
+      updatedAt: new Date().toISOString(),
+    });
+  }
+  notifyHostDataMutated();
 }
 
 /** Soft-delete — same as Web Quiz Library (keeps audience reports). */
@@ -169,6 +262,19 @@ export async function deleteQuiz(id: string) {
     throw new Error(response.error || 'Failed to delete quiz');
   }
   forgetSavedQuiz(id);
+  notifyHostDataMutated();
+}
+
+/** Same as Web Reports: DELETE /quizzes/:id/launches/:launchId (one launch + its attempts). */
+export async function deleteQuizLaunch(quizId: string, launchId: string) {
+  const response = await apiRequest<{ success?: boolean; error?: string }>(
+    `/quizzes/${quizId}/launches/${encodeURIComponent(launchId)}`,
+    { method: 'DELETE' }
+  );
+  if (!response.success) {
+    throw new Error(response.error || 'Failed to delete launch');
+  }
+  notifyHostDataMutated();
 }
 
 export async function launchQuiz(
@@ -181,7 +287,6 @@ export async function launchQuiz(
     shuffleQuestions: boolean;
     shuffleAnswers: boolean;
     showFinalScore: boolean;
-    oneAttempt: boolean;
     launchedAt: string;
   }
 ) {
@@ -192,7 +297,23 @@ export async function launchQuiz(
   if (!response.success) {
     throw new Error(response.error || 'Launch failed');
   }
-  return response.data;
+  const data = response.data;
+  const nextId = String(data?.id || id);
+  const cached = savedQuizCache.get(nextId);
+  const next = asHostQuiz(
+    {
+      ...(cached || {}),
+      ...(data || {}),
+      id: nextId,
+      launched: true,
+      status: data?.status || 'launched',
+      updatedAt: data?.updatedAt || new Date().toISOString(),
+    },
+    nextId
+  );
+  rememberSavedQuiz(next);
+  notifyHostDataMutated();
+  return next;
 }
 
 export async function generateAiQuiz(body: {
@@ -219,12 +340,18 @@ function isLaunchedFlag(quiz: HostQuiz) {
  * - Ready: otherwise (including after POST /finish writes status ready)
  */
 export function quizBucket(quiz: HostQuiz): 'ready' | 'launched' | 'finished' {
-  if (isQuizCurrentlyActive(quiz)) return 'launched';
-  if (isQuizExpired(quiz)) return 'finished';
-  const status = String(quiz.status || '').toLowerCase();
-  if (status === 'finished' || status === 'completed') return 'finished';
-  if (isLaunchedFlag(quiz) && (status === 'launched' || status === 'active')) return 'launched';
-  if (isLaunchedFlag(quiz) && status !== 'finished' && status !== 'completed') return 'launched';
-  if (status === 'launched' || status === 'active') return 'launched';
-  return 'ready';
+  try {
+    if (!quiz || typeof quiz !== 'object') return 'ready';
+    if (isQuizLiveLikeLaunchGuard(quiz)) return 'launched';
+    if (isQuizCurrentlyActive(quiz)) return 'launched';
+    if (isQuizExpired(quiz)) return 'finished';
+    const status = String(quiz.status || '').toLowerCase();
+    if (status === 'finished' || status === 'completed') return 'finished';
+    if (isLaunchedFlag(quiz) && (status === 'launched' || status === 'active')) return 'launched';
+    if (isLaunchedFlag(quiz) && status !== 'finished' && status !== 'completed') return 'launched';
+    if (status === 'launched' || status === 'active') return 'launched';
+    return 'ready';
+  } catch {
+    return 'ready';
+  }
 }

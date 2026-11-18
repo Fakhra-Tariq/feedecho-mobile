@@ -4,6 +4,7 @@ import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { MarketingHeader } from '@/components/MarketingHeader';
 import { MarketingTabBar } from '@/components/MarketingTabBar';
+import { MeetTheTeam } from '@/components/MeetTheTeam';
 import { AppButton, AppCard } from '@/components/ui';
 import { COLORS, FONT_WEIGHTS, RADIUS, SHADOWS, SPACING, TYPE } from '@/constants/theme';
 
@@ -123,6 +124,8 @@ export default function AboutScreen() {
             ))}
           </View>
         </View>
+
+        <MeetTheTeam />
       </ScrollView>
       <MarketingTabBar active="about" />
     </View>

@@ -115,7 +115,7 @@ export default function SessionsScreen() {
   };
 
   const onEndConfirm = async () => {
-    if (!endTarget) return;
+    if (!endTarget || busy) return;
     setBusy(true);
     try {
       await endSession(endTarget);
@@ -337,7 +337,7 @@ export default function SessionsScreen() {
       <ConfirmModal
         visible={Boolean(endTarget)}
         title="End Session?"
-        message="Are you sure you want to end this session? This action cannot be undone."
+        message="Are you sure you want to end this session? The active activity will end too. This action cannot be undone."
         confirmLabel="End Session"
         destructive
         busy={busy}

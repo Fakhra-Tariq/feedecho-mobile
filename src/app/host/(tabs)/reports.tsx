@@ -1,7 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useFocusEffect } from 'expo-router';
 import {
   ActivityIndicator,
+  Alert,
   Modal,
   Pressable,
   ScrollView,
@@ -16,8 +18,10 @@ import { ConfirmModal } from '@/components/ConfirmModal';
 import { KEYBOARD_SCROLL_PROPS, KeyboardSafeScreen } from '@/components/KeyboardSafeScreen';
 import { COLORS, FONT_WEIGHTS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
+import { useHostSessions } from '@/context/HostSessionContext';
 import { db } from '../../../../firebaseConfig';
 import { apiRequest } from '@/lib/api';
+import { deleteQuizLaunch } from '@/lib/hostQuizzes';
 import { normalizeQuizTypeLabel } from '@/lib/aiGeneratedQuiz';
 import {
   buildLaunchHistory,
@@ -181,6 +185,7 @@ type ReportView = 'launches' | 'participants' | 'detail' | null;
 
 export default function HostReportsScreen() {
   const { profile } = useAuth();
+  const { dataEpoch } = useHostSessions();
   const teacherUid = profile?.uid || '';
 
   const [loadingQuizzes, setLoadingQuizzes] = useState(true);
@@ -195,7 +200,10 @@ export default function HostReportsScreen() {
   const [loadingReportDetail, setLoadingReportDetail] = useState(false);
   const [deleteConfirmQuizId, setDeleteConfirmQuizId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteConfirmLaunch, setDeleteConfirmLaunch] = useState<any | null>(null);
+  const [deletingLaunchId, setDeletingLaunchId] = useState<string | null>(null);
 
+  const hasQuizRowsRef = useRef(false);
   const quizIds = useMemo(() => quizzes.map((q) => q.id).filter(Boolean), [quizzes]);
   const { submissionsByQuizId, participantsByQuizId, ready: listenersReady } =
     useQuizSubmissionListeners(quizIds, { listenParticipants: true });
@@ -206,7 +214,7 @@ export default function HostReportsScreen() {
       setLoadingQuizzes(false);
       return;
     }
-    setLoadingQuizzes(true);
+    if (!hasQuizRowsRef.current) setLoadingQuizzes(true);
     try {
       let list: any[] = [];
       try {
@@ -214,24 +222,35 @@ export default function HostReportsScreen() {
           '/quizzes?includeDeleted=true'
         );
         list = (response.success ? response.data : [])?.slice() || [];
-      } catch {
+      } catch (error) {
+        console.warn('[host reports] GET /quizzes', error);
         list = [];
       }
       if (!list.length) {
-        list = await loadHostQuizzesFromRtdb(teacherUid, { includeDeleted: true });
+        const fromRtdb = await loadHostQuizzesFromRtdb(teacherUid, { includeDeleted: true });
+        if (fromRtdb.length) list = fromRtdb;
       } else {
         list.sort(compareQuizzesByLaunchDesc);
       }
-      setQuizzes(list);
-      setApiFallbackByQuizId({});
+      if (list.length) {
+        hasQuizRowsRef.current = true;
+        setQuizzes(list);
+        setApiFallbackByQuizId({});
+      }
     } finally {
       setLoadingQuizzes(false);
     }
   }, [teacherUid]);
 
   useEffect(() => {
-    refreshQuizzes();
-  }, [refreshQuizzes]);
+    void refreshQuizzes();
+  }, [refreshQuizzes, dataEpoch]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshQuizzes();
+    }, [refreshQuizzes])
+  );
 
   const quizReports = useMemo(() => {
     if (!quizzes.length) return [];
@@ -283,7 +302,46 @@ export default function HostReportsScreen() {
     setLaunchHistory([]);
     setSelectedSubmission(null);
     setReportModalView(null);
+    setDeleteConfirmLaunch(null);
+    setDeletingLaunchId(null);
   }, []);
+
+  const isActiveLaunch = useCallback((launch: any, quiz: any) => {
+    const status = String(launch?.status || '').toLowerCase();
+    if (status === 'active' || status === 'live' || status === 'running') return true;
+    const currentId = String(quiz?.currentLaunchId || '').trim();
+    const launchId = String(launch?.id || '').trim();
+    if (!currentId || !launchId || currentId !== launchId) return false;
+    return Boolean(quiz?.launched) || !launch?.finishedAt;
+  }, []);
+
+  const applyQuizResultsPayload = useCallback(
+    (quiz: any, data: any) => {
+      if (!quiz?.id || !data) return [];
+      let launches: any[] = [];
+      setApiFallbackByQuizId((prev) => {
+        const nextFallback = { ...prev, [quiz.id]: data };
+        const refreshed = collectReportDataForQuiz(
+          quiz,
+          submissionsByQuizId,
+          participantsByQuizId,
+          nextFallback,
+          { includeDetails: true }
+        );
+        setSelectedReport(refreshed);
+        launches = buildLaunchHistory(
+          quiz,
+          refreshed.submissions,
+          data.participants || [],
+          data.launches || null
+        );
+        setLaunchHistory(launches);
+        return nextFallback;
+      });
+      return launches;
+    },
+    [participantsByQuizId, submissionsByQuizId]
+  );
 
   const openQuizReport = useCallback(
     async (report: any) => {
@@ -394,6 +452,45 @@ export default function HostReportsScreen() {
       // keep modal open on failure — user sees confirm again
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleDeleteLaunch = async () => {
+    const launch = deleteConfirmLaunch;
+    const quiz = selectedReport?.quiz;
+    if (!launch?.id || !quiz?.id || deletingLaunchId) return;
+    if (isActiveLaunch(launch, quiz)) {
+      Alert.alert('Finish the quiz first');
+      setDeleteConfirmLaunch(null);
+      return;
+    }
+    setDeletingLaunchId(String(launch.id));
+    try {
+      await deleteQuizLaunch(quiz.id, launch.id);
+      setDeleteConfirmLaunch(null);
+
+      let remaining = launchHistory.filter((row: any) => String(row.id) !== String(launch.id));
+      try {
+        const results = await apiRequest<{ success?: boolean; data?: any }>(
+          `/quiz-submissions/${quiz.id}/results`
+        );
+        const data = results?.data;
+        if (data) {
+          remaining = applyQuizResultsPayload(quiz, data);
+        } else {
+          setLaunchHistory(remaining);
+        }
+      } catch {
+        setLaunchHistory(remaining);
+      }
+
+      if (remaining.length === 0) {
+        closeReportModal();
+      }
+    } catch (err: any) {
+      Alert.alert('Could not delete launch', err?.message || 'Failed to delete launch');
+    } finally {
+      setDeletingLaunchId(null);
     }
   };
 
@@ -781,9 +878,43 @@ export default function HostReportsScreen() {
                 {launchesNewestFirst.length === 0 ? (
                   <Text style={styles.emptyText}>No launches recorded for this quiz yet.</Text>
                 ) : (
-                  launchesNewestFirst.map((item: any) => (
+                  launchesNewestFirst.map((item: any) => {
+                    const activeLaunch = isActiveLaunch(item, selectedReport?.quiz);
+                    const isDeletingThis = deletingLaunchId === String(item.id);
+                    return (
                     <View key={String(item.id)} style={styles.launchCard}>
-                      <Text style={styles.launchTitle}>Launch {item.launchNumber}</Text>
+                      <View style={styles.launchTitleRow}>
+                        <Text style={styles.launchTitle} numberOfLines={1}>
+                          Launch {item.launchNumber}
+                        </Text>
+                        {activeLaunch ? (
+                          <View
+                            style={styles.launchTrashBtn}
+                            accessibilityRole="button"
+                            accessibilityState={{ disabled: true }}
+                            accessibilityLabel="Delete launch"
+                            accessibilityHint="Finish the quiz first">
+                            <Ionicons name="trash-outline" size={18} color="#E8B4B0" />
+                          </View>
+                        ) : (
+                          <Pressable
+                            onPress={() => setDeleteConfirmLaunch(item)}
+                            disabled={Boolean(deletingLaunchId)}
+                            hitSlop={4}
+                            style={({ pressed }) => [
+                              styles.launchTrashBtn,
+                              pressed && styles.launchTrashBtnPressed,
+                            ]}
+                            accessibilityRole="button"
+                            accessibilityLabel="Delete launch">
+                            {isDeletingThis ? (
+                              <ActivityIndicator size="small" color="#B3261E" />
+                            ) : (
+                              <Ionicons name="trash-outline" size={18} color="#B3261E" />
+                            )}
+                          </Pressable>
+                        )}
+                      </View>
                       <View style={styles.launchMeta}>
                         <Text style={styles.modalHint}>{formatDate(item.launchedAt)}</Text>
                         <Text style={styles.modalHint}>
@@ -807,7 +938,8 @@ export default function HostReportsScreen() {
                         <Text style={styles.plumBtnLabel}>View</Text>
                       </Pressable>
                     </View>
-                  ))
+                    );
+                  })
                 )}
               </ScrollView>
             )}
@@ -824,6 +956,16 @@ export default function HostReportsScreen() {
         busy={deleting}
         onCancel={() => setDeleteConfirmQuizId(null)}
         onConfirm={handleDeleteQuiz}
+      />
+      <ConfirmModal
+        visible={Boolean(deleteConfirmLaunch)}
+        title={`Delete Launch ${deleteConfirmLaunch?.launchNumber}?`}
+        message={`Delete Launch ${deleteConfirmLaunch?.launchNumber}? Its participant results will be permanently removed. This cannot be undone.`}
+        confirmLabel="Delete"
+        destructive
+        busy={Boolean(deletingLaunchId)}
+        onCancel={() => !deletingLaunchId && setDeleteConfirmLaunch(null)}
+        onConfirm={handleDeleteLaunch}
       />
     </KeyboardSafeScreen>
   );
@@ -1179,7 +1321,30 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     padding: 12,
   },
-  launchTitle: { color: '#2B1F27', fontSize: 15, fontWeight: FONT_WEIGHTS.bold },
+  launchTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 44,
+  },
+  launchTitle: {
+    flex: 1,
+    minWidth: 0,
+    color: '#2B1F27',
+    fontSize: 15,
+    fontWeight: FONT_WEIGHTS.bold,
+    paddingRight: 8,
+  },
+  launchTrashBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#F5B5B0',
+    backgroundColor: COLORS.white,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  launchTrashBtnPressed: { backgroundColor: '#FBEAE8' },
   launchMeta: {
     flexDirection: 'row',
     flexWrap: 'wrap',

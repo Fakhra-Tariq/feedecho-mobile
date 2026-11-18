@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { router, useLocalSearchParams, type Href } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { router, useLocalSearchParams, useNavigation, type Href } from 'expo-router';
+import { useEffect, useLayoutEffect, useState } from 'react';
 import {
   ActivityIndicator,
   ScrollView,
@@ -11,8 +11,13 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { AudienceActivityHeader } from '@/components/Audience/AudienceActivityHeader';
+import { AudiencePostActivityHomeButton } from '@/components/Audience/AudiencePostActivityHomeButton';
+import { GuestProgressLoginBanner } from '@/components/Audience/GuestProgressLoginBanner';
 import { showAlert } from '@/components/feedback';
+import { StudentAccountButton } from '@/components/HostProfileButton';
 import { cleanErrorMessage } from '@/lib/activeActivity';
 import {
   KEYBOARD_BOTTOM_GAP,
@@ -22,17 +27,22 @@ import {
 import { COLORS, FONT_WEIGHTS, RADIUS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { useLeaveActivity } from '@/lib/audienceHomeNavigation';
+import { isCodeJoinGuest } from '@/lib/guestSession';
+import { ApiError } from '@/lib/api';
 import {
   getExitTicketByCode,
   LIKERT_OPTIONS,
+  startExitTicketAttempt,
   submitExitTicketResponse,
   type ExitTicket,
 } from '@/lib/hostExitTickets';
+import { rememberExitTicketTitle } from '@/lib/useExitTicketActivityTitles';
 import {
   getMyParticipation,
   hasGuestSubmitted,
   markExitTicketParticipated,
   markGuestExitTicketSubmitted,
+  rememberExitTicketAttempt,
 } from '@/lib/studentParticipation';
 
 const SESSION_CODE_KEY = 'sessionCode';
@@ -40,19 +50,34 @@ const STUDENT_NAME_KEY = 'studentName';
 const MAX_CHARS = 500;
 
 export default function AudienceExitTicketScreen() {
-  const { profile } = useAuth();
+  const { profile, user, isHost } = useAuth();
+  const navigation = useNavigation();
+  const insets = useSafeAreaInsets();
   const { leave } = useLeaveActivity();
-  const params = useLocalSearchParams<{ code?: string; alreadySubmitted?: string }>();
+  const params = useLocalSearchParams<{
+    code?: string;
+    alreadySubmitted?: string;
+    alreadyAttemptedOnDevice?: string;
+  }>();
   const alreadySubmittedParam = String(params.alreadySubmitted || '') === '1';
+  const alreadyAttemptedOnDeviceParam = String(params.alreadyAttemptedOnDevice || '') === '1';
   const isLoggedInStudent = Boolean(profile?.uid && !profile?.guest);
   const isGuest = Boolean(profile?.guest) && !isLoggedInStudent;
+  /** Header identity: code-join guest, never a Firebase-signed-in student (public join included). */
+  const isHeaderGuest = isCodeJoinGuest({
+    profileGuest: profile?.guest,
+    isHost,
+    firebaseUid: user?.uid,
+  });
   const [joinCode, setJoinCode] = useState('');
+  const [guestHeaderName, setGuestHeaderName] = useState('');
   const [codeInput, setCodeInput] = useState('');
   const [ticket, setTicket] = useState<ExitTicket | null>(null);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
+  const [submitted, setSubmitted] = useState(alreadyAttemptedOnDeviceParam);
+  const [guestBlockedOnDevice, setGuestBlockedOnDevice] = useState(alreadyAttemptedOnDeviceParam);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -92,7 +117,10 @@ export default function AudienceExitTicketScreen() {
           initial[index] = '';
         });
         setAnswers(initial);
-        if (alreadySubmittedParam && isLoggedInStudent) {
+        if (alreadyAttemptedOnDeviceParam && !isLoggedInStudent) {
+          setGuestBlockedOnDevice(true);
+          setSubmitted(true);
+        } else if (alreadySubmittedParam && isLoggedInStudent) {
           setSubmitted(true);
         } else if (isLoggedInStudent && response.data.id) {
           const part = await getMyParticipation(
@@ -103,6 +131,30 @@ export default function AudienceExitTicketScreen() {
           );
           if (!cancelled && part.status === 'submitted') {
             setSubmitted(true);
+          }
+        } else if (!isLoggedInStudent && response.data.id) {
+          const joinedName =
+            (await AsyncStorage.getItem(STUDENT_NAME_KEY))?.trim() ||
+            String(profile?.name || '').trim();
+          if (joinedName) {
+            try {
+              const start = await startExitTicketAttempt(response.data.id, {
+                studentName: joinedName,
+              });
+              if (start?.attemptId) {
+                await rememberExitTicketAttempt(response.data.id, start.attemptId);
+              }
+            } catch (startErr) {
+              if (
+                startErr instanceof ApiError &&
+                (startErr.data as { code?: string } | null)?.code === 'ALREADY_ATTEMPTED'
+              ) {
+                if (!cancelled) {
+                  setGuestBlockedOnDevice(true);
+                  setSubmitted(true);
+                }
+              }
+            }
           }
         }
       } catch (err) {
@@ -117,7 +169,62 @@ export default function AudienceExitTicketScreen() {
     return () => {
       cancelled = true;
     };
-  }, [joinCode, alreadySubmittedParam, isLoggedInStudent, profile?.uid, profile?.email, profile?.name]);
+  }, [
+    joinCode,
+    alreadySubmittedParam,
+    alreadyAttemptedOnDeviceParam,
+    isLoggedInStudent,
+    profile?.uid,
+    profile?.email,
+    profile?.name,
+  ]);
+
+  useEffect(() => {
+    if (!isHeaderGuest) return;
+    let cancelled = false;
+    (async () => {
+      const stored = (await AsyncStorage.getItem(STUDENT_NAME_KEY))?.trim() || '';
+      if (!cancelled) {
+        setGuestHeaderName(stored || String(profile?.name || '').trim());
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isHeaderGuest, profile?.name]);
+
+  const ticketTitle = String(ticket?.title || '').trim();
+  const activityHeader = (
+    <AudienceActivityHeader
+      activityLabel="Exit Ticket"
+      title={ticketTitle || 'Exit Ticket'}
+      participantName={
+        isHeaderGuest ? guestHeaderName : String(profile?.name || '').trim()
+      }
+      isLoggedIn={!isHeaderGuest && isLoggedInStudent}
+      rightSlot={isHeaderGuest ? undefined : <StudentAccountButton />}
+    />
+  );
+
+  useLayoutEffect(() => {
+    const hideNativeHeader = submitted || Boolean(ticket);
+    if (hideNativeHeader) {
+      navigation.setOptions({
+        headerShown: false,
+        headerBackVisible: false,
+        headerLeft: () => null,
+        headerRight: () => null,
+      });
+      return;
+    }
+    navigation.setOptions({
+      headerShown: true,
+      headerBackVisible: true,
+      headerTitle: 'Exit Ticket',
+      headerTitleAlign: 'left',
+      headerRight: isHeaderGuest ? () => null : () => <StudentAccountButton />,
+    });
+  }, [isHeaderGuest, navigation, submitted, ticket]);
 
   const setAnswer = (index: number, value: string) => {
     setAnswers((prev) => ({ ...prev, [index]: value }));
@@ -149,6 +256,8 @@ export default function AudienceExitTicketScreen() {
     if (isGuest && studentName) {
       try {
         if (await hasGuestSubmitted('exitTicket', ticket.id, studentName)) {
+          setGuestBlockedOnDevice(true);
+          setSubmitted(true);
           return;
         }
       } catch (checkErr) {
@@ -183,16 +292,19 @@ export default function AudienceExitTicketScreen() {
         questionIndex: index,
         answer: answers[index].trim(),
       }));
+      const ticketTitle = String(ticket.title || '').trim();
       const result = await submitExitTicketResponse(ticket.id, {
         ticketId: ticket.id,
         studentName,
         answers: formattedAnswers,
+        ...(ticketTitle ? { ticketTitle } : {}),
         ...(profile?.uid ? { studentUid: profile.uid } : {}),
         ...(profile?.email ? { studentEmail: profile.email } : {}),
       });
       if (!result.success) {
         throw new Error(result.error || 'Failed to submit response');
       }
+      if (ticketTitle) rememberExitTicketTitle(ticket.id, ticketTitle);
       if (isLoggedInStudent && profile?.uid) {
         await markExitTicketParticipated(String(profile.uid), ticket.id);
       } else if (isGuest && studentName) {
@@ -200,6 +312,14 @@ export default function AudienceExitTicketScreen() {
       }
       setSubmitted(true);
     } catch (err) {
+      if (
+        err instanceof ApiError &&
+        (err.data as { code?: string } | null)?.code === 'ALREADY_ATTEMPTED'
+      ) {
+        setGuestBlockedOnDevice(true);
+        setSubmitted(true);
+        return;
+      }
       showAlert({
         type: 'error',
         title: 'Submit failed',
@@ -213,23 +333,24 @@ export default function AudienceExitTicketScreen() {
 
   if (submitted) {
     return (
-      <View style={styles.centered}>
-        <View style={styles.successCard}>
-          <View style={styles.successIconWrap}>
-            <Ionicons name="checkmark" size={32} color={COLORS.successAccent} />
+      <View style={styles.screen}>
+        {activityHeader}
+        <View style={styles.centered}>
+          <View style={styles.successCard}>
+            <View style={styles.successIconWrap}>
+              <Ionicons name="checkmark" size={32} color={COLORS.successAccent} />
+            </View>
+            <Text style={styles.successTitle}>Response Submitted!</Text>
+            <Text style={styles.successBody}>
+              Thank you for completing the exit ticket. Your response has been recorded.
+            </Text>
+            <AudiencePostActivityHomeButton
+              onPress={leave}
+              style={styles.successButton}
+              labelStyle={styles.primaryLabel}
+              icon
+            />
           </View>
-          <Text style={styles.successTitle}>Response Submitted!</Text>
-          <Text style={styles.successBody}>
-            Thank you for completing the exit ticket. Your response has been recorded.
-          </Text>
-          <TouchableOpacity
-            style={styles.successButton}
-            onPress={leave}
-            accessibilityRole="button"
-            accessibilityLabel="Back to Home">
-            <Ionicons name="arrow-back" size={20} color={COLORS.white} />
-            <Text style={styles.primaryLabel}>Back to Home</Text>
-          </TouchableOpacity>
         </View>
       </View>
     );
@@ -272,14 +393,14 @@ export default function AudienceExitTicketScreen() {
 
   return (
     <KeyboardSafeScreen scroll={false} style={styles.screen}>
+      {activityHeader}
+      <GuestProgressLoginBanner visible={isGuest} />
       <ScrollView
         {...KEYBOARD_SCROLL_PROPS}
-        contentContainerStyle={[styles.content, { paddingBottom: SPACING[16] + KEYBOARD_BOTTOM_GAP }]}>
-        <Text style={styles.heading}>{ticket.title || 'Exit Ticket'}</Text>
-        <Text style={styles.hint}>
-          {(profile?.name || 'Audience').trim()}
-        </Text>
-
+        contentContainerStyle={[
+          styles.content,
+          { paddingBottom: insets.bottom + 16 + KEYBOARD_BOTTOM_GAP },
+        ]}>
         {(ticket.questions || []).map((question, index) => {
           const answer = answers[index] || '';
           return (
@@ -401,7 +522,75 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
     gap: SPACING[3],
   },
-  content: { padding: SPACING[4], paddingBottom: SPACING[16], gap: SPACING[3] },
+  content: {
+    paddingHorizontal: SPACING[4],
+    paddingTop: 12,
+    paddingBottom: SPACING[16],
+    gap: SPACING[3],
+  },
+  guestNavSafe: {
+    backgroundColor: COLORS.white,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
+  },
+  guestNav: {
+    minHeight: 56,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    gap: 8,
+  },
+  guestNavCenter: {
+    flex: 1,
+    flexShrink: 1,
+    minWidth: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  guestNavRight: {
+    flexShrink: 0,
+    maxWidth: 110,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  guestNavName: {
+    flexShrink: 1,
+    minWidth: 0,
+    fontSize: 13,
+    fontWeight: FONT_WEIGHTS.medium,
+    color: '#2B1F27',
+    writingDirection: 'auto',
+  },
+  studentNavLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  studentNavBack: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingRight: 4,
+  },
+  navBrand: {
+    flexShrink: 0,
+    color: COLORS.header,
+    fontSize: 17,
+    fontWeight: FONT_WEIGHTS.semibold,
+  },
+  navTitle: {
+    flexShrink: 1,
+    minWidth: 0,
+    maxWidth: '100%',
+    fontSize: 16,
+    fontWeight: FONT_WEIGHTS.semibold,
+    color: '#2B1F27',
+    textAlign: 'center',
+    writingDirection: 'auto',
+  },
   heading: { color: COLORS.text, fontSize: 24, fontWeight: FONT_WEIGHTS.bold },
   hint: { color: COLORS.darkTextSecondary },
   card: {
