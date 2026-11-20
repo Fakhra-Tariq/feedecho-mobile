@@ -17,7 +17,7 @@
     },
     "android": {
       "package": "com.feedecho",
-      "versionCode": 6,
+      "versionCode": 7,
       "adaptiveIcon": {
 "backgroundColor": "#F4F1EC",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -73,7 +73,8 @@
             "photo"
           ]
         }
-      ]
+      ],
+      "./plugins/withOptionalPortrait"
     ],
     "experiments": {
       "typedRoutes": true,
