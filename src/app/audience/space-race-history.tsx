@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -24,12 +24,21 @@ import {
 } from '@/lib/saveResourceToDevice';
 import { COLORS, FONT_WEIGHTS, SPACING } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
-import { formatSessionDate } from '@/lib/formatLocalDateTime';
+import { formatSessionDate, parseUtcTimestamp } from '@/lib/formatLocalDateTime';
 import {
   getSharedRaceResources,
   getStudentSpaceRaceHistory,
 } from '@/lib/hostSpaceRaces';
+import { ApiError } from '@/lib/api';
+import {
+  downloadErrorMessage,
+  downloadLiveChatFileToCache,
+  listMyLiveChatResources,
+} from '@/lib/liveChatResources';
 import { studentQueryFromProfile } from '@/lib/studentsActivity';
+
+const SOURCE_TABS = ['All', 'Space Race', 'Live Chat'] as const;
+type SourceTab = (typeof SOURCE_TABS)[number];
 
 const RESOURCE_FILTERS = ['All', 'Documents', 'Images', 'Links'] as const;
 type ResourceFilter = (typeof RESOURCE_FILTERS)[number];
@@ -42,6 +51,10 @@ type Resource = {
   senderName?: string;
   linkTitle?: string;
   text?: string;
+  sharedAt?: string;
+  chatId?: string;
+  gated?: boolean;
+  mimeType?: string;
 };
 
 type SessionRow = {
@@ -49,11 +62,36 @@ type SessionRow = {
   quizName: string;
   date: string;
   time: string;
-  teamId?: number;
+  timestamp: Date | null;
+  sortMs: number;
+  teamId?: number | null;
+  source: 'spaceRace' | 'liveChat';
+  chatId?: string;
   resources: Resource[];
 };
 
-function mapResource(resource: any, index: number): Resource {
+function timeMs(value: unknown) {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isNaN(ms) ? 0 : ms;
+  }
+  const parsed = parseUtcTimestamp(value);
+  return parsed ? parsed.getTime() : 0;
+}
+
+function sortResourcesNewest(resources: Resource[]) {
+  return [...resources].sort((a, b) => timeMs(b.sharedAt) - timeMs(a.sharedAt));
+}
+
+function sessionSortMs(session: SessionRow) {
+  const newestShare = session.resources.reduce(
+    (max, resource) => Math.max(max, timeMs(resource.sharedAt)),
+    0
+  );
+  return newestShare || timeMs(session.timestamp);
+}
+
+function mapResource(resource: any, index: number, extras: Partial<Resource> = {}): Resource {
   return {
     id: String(resource.id || resource.resourceId || `res-${index}`),
     type: resource.type || 'file',
@@ -62,6 +100,10 @@ function mapResource(resource: any, index: number): Resource {
     senderName: resource.senderName || resource.sharedBy || '',
     linkTitle: resource.linkTitle,
     text: resource.text,
+    sharedAt: resource.sharedAt || resource.createdAt || '',
+    mimeType: resource.mimeType,
+    chatId: extras.chatId || resource.chatId,
+    gated: extras.gated,
   };
 }
 
@@ -95,6 +137,7 @@ export default function SpaceRaceHistoryScreen() {
   const isGuest = Boolean(profile?.guest) || !profile?.uid;
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [sourceTab, setSourceTab] = useState<SourceTab>('All');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [resourceFilters, setResourceFilters] = useState<Record<string, ResourceFilter>>({});
   const [previewImage, setPreviewImage] = useState<{ url: string; fileName: string } | null>(null);
@@ -113,30 +156,71 @@ export default function SpaceRaceHistoryScreen() {
           return;
         }
         const query = studentQueryFromProfile(profile, user);
-        const rows = await getStudentSpaceRaceHistory(query);
-        const withResources = await Promise.all(
+        const [rows, liveGroups] = await Promise.all([
+          getStudentSpaceRaceHistory(query).catch(() => []),
+          listMyLiveChatResources().catch(() => []),
+        ]);
+        const raceSessions = await Promise.all(
           rows.map(async (row) => {
-            const { date, time } = formatSessionDate(row.joinedAt || row.sessionDate);
+            const joined = formatSessionDate(row.joinedAt || row.sessionDate);
             let resources: Resource[] = [];
             if (row.raceId && row.teamId != null) {
               try {
                 const raw = await getSharedRaceResources(row.raceId, Number(row.teamId), query);
-                resources = raw.map(mapResource);
+                resources = sortResourcesNewest(raw.map((item, index) => mapResource(item, index)));
               } catch {
                 resources = [];
               }
             }
+            const sortMs =
+              resources.reduce((max, resource) => Math.max(max, timeMs(resource.sharedAt)), 0) ||
+              timeMs(joined.timestamp);
+            const shown = formatSessionDate(sortMs || joined.timestamp);
             return {
               raceId: row.raceId,
               quizName: row.quizName || 'Space Race',
-              date,
-              time,
+              date: shown.date,
+              time: shown.time,
+              timestamp: shown.timestamp || joined.timestamp,
+              sortMs,
               teamId: row.teamId,
+              source: 'spaceRace' as const,
               resources,
             };
           })
         );
-        if (!cancelled) setSessions(withResources);
+        const liveSessions = liveGroups.map((row) => {
+          const joined = formatSessionDate(row.joinedAt);
+          const resources = sortResourcesNewest(
+            (row.resources || []).map((resource, index) =>
+              mapResource(resource, index, {
+                chatId: row.chatId,
+                gated: resource.type !== 'link',
+              })
+            )
+          );
+          const sortMs =
+            resources.reduce((max, resource) => Math.max(max, timeMs(resource.sharedAt)), 0) ||
+            timeMs(joined.timestamp);
+          const shown = formatSessionDate(sortMs || joined.timestamp);
+          return {
+            raceId: `liveChat:${row.chatId}`,
+            chatId: row.chatId,
+            quizName: row.chatName || 'Live Chat',
+            date: shown.date,
+            time: shown.time,
+            timestamp: shown.timestamp || joined.timestamp,
+            sortMs,
+            teamId: null,
+            source: 'liveChat' as const,
+            resources,
+          };
+        });
+        if (!cancelled) {
+          setSessions(
+            [...raceSessions, ...liveSessions].sort((a, b) => (b.sortMs || 0) - (a.sortMs || 0))
+          );
+        }
       } catch {
         if (!cancelled) setSessions([]);
       } finally {
@@ -148,7 +232,17 @@ export default function SpaceRaceHistoryScreen() {
     };
   }, [isGuest, profile, user]);
 
-  const totalResources = sessions.reduce((sum, s) => sum + s.resources.length, 0);
+  const visibleSessions = useMemo(() => {
+    return sessions
+      .filter((session) => session.resources.length > 0)
+      .filter((session) => {
+        if (sourceTab === 'Space Race') return session.source !== 'liveChat';
+        if (sourceTab === 'Live Chat') return session.source === 'liveChat';
+        return true;
+      })
+      .sort((a, b) => sessionSortMs(b) - sessionSortMs(a));
+  }, [sessions, sourceTab]);
+  const totalResources = visibleSessions.reduce((sum, session) => sum + session.resources.length, 0);
 
   const openUrl = async (url?: string) => {
     if (!url || url === '#') {
@@ -167,7 +261,8 @@ export default function SpaceRaceHistoryScreen() {
     const key = `${resource.id}:${resource.fileName}`;
     if (downloadingKeys.includes(key)) return;
     const url = resolveFileDownloadUrl(resource);
-    if (!url) {
+    const gated = Boolean(resource.gated && resource.chatId);
+    if (!gated && !url) {
       showAlert({
         type: 'warning',
         title: 'Unavailable',
@@ -178,9 +273,15 @@ export default function SpaceRaceHistoryScreen() {
     }
     setDownloadingKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
     try {
+      const localUri =
+        resource.gated && resource.chatId
+          ? await downloadLiveChatFileToCache(resource.chatId, resource.id, resource.fileName)
+          : '';
       const result = await saveResourceToDevice({
-        url,
+        url: localUri ? undefined : url,
+        localUri: localUri || undefined,
         fileName: resource.fileName,
+        mimeType: resource.mimeType,
         resourceType: resource.type,
       });
       if (result.status === 'saved') {
@@ -190,7 +291,9 @@ export default function SpaceRaceHistoryScreen() {
       const message =
         error instanceof Error && error.name === 'DownloadPermissionError'
           ? SAVE_PERMISSION_MESSAGE
-          : DOWNLOAD_FAILED_MESSAGE;
+          : error instanceof ApiError
+            ? downloadErrorMessage(error)
+            : DOWNLOAD_FAILED_MESSAGE;
       showToast({ type: 'info', title: message });
     } finally {
       setDownloadingKeys((prev) => prev.filter((item) => item !== key));
@@ -219,7 +322,7 @@ export default function SpaceRaceHistoryScreen() {
     return (
       <View style={styles.centered}>
         <ActivityIndicator color={COLORS.primary} />
-        <Text style={styles.loadingText}>Loading space race history...</Text>
+        <Text style={styles.loadingText}>Loading resources...</Text>
       </View>
     );
   }
@@ -227,7 +330,15 @@ export default function SpaceRaceHistoryScreen() {
   return (
     <View style={styles.screen}>
       <ScrollView contentContainerStyle={styles.scroll}>
-        <Text style={styles.pageTitle}>Space Race History</Text>
+        <View style={styles.banner}>
+          <View style={styles.bannerCopy}>
+            <Text style={styles.bannerTitle}>Resources</Text>
+            <Text style={styles.bannerHint}>
+              Files and links shared in your space races and live chats.
+            </Text>
+          </View>
+          <Ionicons name="folder-open-outline" size={32} color="rgba(255,255,255,0.8)" />
+        </View>
 
         <View style={styles.statsRow}>
           <View style={styles.statCard}>
@@ -236,7 +347,7 @@ export default function SpaceRaceHistoryScreen() {
             </View>
             <View style={styles.statCopy}>
               <Text style={styles.statLabel}>Total Sessions</Text>
-              <Text style={styles.statValue}>{sessions.length}</Text>
+              <Text style={styles.statValue}>{visibleSessions.length}</Text>
             </View>
           </View>
           <View style={styles.statCard}>
@@ -253,13 +364,38 @@ export default function SpaceRaceHistoryScreen() {
         <View style={styles.pastCard}>
           <View style={styles.pastHeader}>
             <Text style={styles.pastTitle}>Past Resources</Text>
-            <Text style={styles.pastHint}>Tap a session to view resources shared by your team</Text>
+            <Text style={styles.pastHint}>Tap a session to view resources shared with you</Text>
+            <ScrollView
+              horizontal
+              nestedScrollEnabled
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.sourceTabs}>
+              {SOURCE_TABS.map((tab) => {
+                const on = sourceTab === tab;
+                return (
+                  <Pressable
+                    key={tab}
+                    onPress={() => setSourceTab(tab)}
+                    style={[styles.chip, on ? styles.chipOn : styles.chipOff]}>
+                    <Text style={[styles.chipText, on ? styles.chipTextOn : styles.chipTextOff]}>
+                      {tab}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
           </View>
 
-          {sessions.length === 0 ? (
-            <Text style={styles.empty}>No space race sessions yet.</Text>
+          {visibleSessions.length === 0 ? (
+            <Text style={styles.empty}>
+              {sourceTab === 'Live Chat'
+                ? 'No live chat resources yet.'
+                : sourceTab === 'Space Race'
+                  ? 'No space race sessions yet.'
+                  : 'No resources yet.'}
+            </Text>
           ) : (
-            sessions.map((session) => {
+            visibleSessions.map((session) => {
               const isExpanded = expandedId === session.raceId;
               const storedFilter = resourceFilters[session.raceId];
               const activeFilter: ResourceFilter =
@@ -285,7 +421,9 @@ export default function SpaceRaceHistoryScreen() {
                           {session.quizName}
                         </Text>
                         <View style={styles.teamBadge}>
-                          <Text style={styles.teamBadgeText}>Team {session.teamId}</Text>
+                          <Text style={styles.teamBadgeText}>
+                            {session.source === 'liveChat' ? 'Live Chat' : 'Space Race'}
+                          </Text>
                         </View>
                       </View>
                       <View style={styles.metaRow}>
@@ -415,13 +553,17 @@ export default function SpaceRaceHistoryScreen() {
                                         </Text>
                                       </Pressable>
                                     ) : null}
-                                    <Pressable
-                                      style={styles.trashBtn}
-                                      hitSlop={6}
-                                      onPress={() => setResourceToDelete({ raceId: session.raceId, resource })}
-                                      accessibilityLabel="Delete resource">
-                                      <Ionicons name="trash-outline" size={16} color="#9CA3AF" />
-                                    </Pressable>
+                                    {session.source === 'liveChat' ? null : (
+                                      <Pressable
+                                        style={styles.trashBtn}
+                                        hitSlop={6}
+                                        onPress={() =>
+                                          setResourceToDelete({ raceId: session.raceId, resource })
+                                        }
+                                        accessibilityLabel="Delete resource">
+                                        <Ionicons name="trash-outline" size={16} color="#9CA3AF" />
+                                      </Pressable>
+                                    )}
                                   </View>
                                 </View>
                               ))}
@@ -505,12 +647,18 @@ const styles = StyleSheet.create({
   },
   loadingText: { color: COLORS.mutedText, fontSize: 14 },
   scroll: { padding: SPACING[4], paddingBottom: SPACING[16] },
-  pageTitle: {
-    fontSize: 22,
-    fontWeight: FONT_WEIGHTS.bold,
-    color: '#1a1a1a',
-    marginBottom: SPACING[3],
+  banner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: COLORS.primary,
+    borderRadius: 12,
+    padding: 24,
+    marginBottom: 16,
   },
+  bannerCopy: { flex: 1, minWidth: 0 },
+  bannerTitle: { color: COLORS.white, fontSize: 28, fontWeight: FONT_WEIGHTS.bold, marginBottom: 8 },
+  bannerHint: { color: 'rgba(255,255,255,0.9)', fontSize: 15, lineHeight: 22 },
   statsRow: { flexDirection: 'row', gap: SPACING[2], marginBottom: SPACING[3] },
   statCard: {
     flex: 1,
@@ -548,6 +696,7 @@ const styles = StyleSheet.create({
   },
   pastTitle: { fontSize: 18, fontWeight: FONT_WEIGHTS.bold, color: '#1a1a1a' },
   pastHint: { fontSize: 13, color: '#6B7280', marginTop: 4 },
+  sourceTabs: { flexDirection: 'row', gap: 8, marginTop: 16, paddingBottom: 2 },
   empty: { padding: SPACING[10], textAlign: 'center', color: '#6B7280' },
   emptySmall: { fontSize: 13, color: '#6B7280', paddingVertical: SPACING[2] },
   sessionBlock: { borderBottomWidth: 0.5, borderBottomColor: '#F3EEF8' },

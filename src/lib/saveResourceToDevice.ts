@@ -190,7 +190,8 @@ async function shareToFiles(localUri: string, fileName: string, mimeType: string
  * Save a History resource onto the device. Does not open a viewer.
  */
 export async function saveResourceToDevice(input: {
-  url: string;
+  url?: string;
+  localUri?: string;
   fileName?: string;
   mimeType?: string;
   resourceType?: string;
@@ -202,7 +203,7 @@ export async function saveResourceToDevice(input: {
   let extraCleanupUri = '';
 
   try {
-    localUri = await downloadToCacheFile(input.url, fileName);
+    localUri = input.localUri || (await downloadToCacheFile(input.url || '', fileName));
     if (image) {
       const namedUri = await copyToNamedCache(localUri, fileName);
       extraCleanupUri = namedUri !== localUri ? namedUri : '';

@@ -1,40 +1,47 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
-import { memo, type ReactNode, useState } from 'react';
+import * as FileSystem from 'expo-file-system/legacy';
+import { memo } from 'react';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+
 import {
-  Modal,
-  Pressable,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+  ALLOWED_MIME_TYPES,
+  fileExtensionOf,
+  formatFileSize,
+  isAllowedResourceFile,
+} from '@/constants/resourceAllowlist';
+import { COLORS } from '@/constants/theme';
 
-import { showToast } from '@/components/feedback';
-import { ALLOWED_MIME_TYPES, isAllowedResourceFile } from '@/constants/resourceAllowlist';
-import { COLORS, FONT_WEIGHTS, SPACING } from '@/constants/theme';
-import { parseSafeHttpUrl, shareChatResourceLink, uploadChatResourceFile } from '@/lib/liveChatResources';
-
-type Props = {
-  chatId: string;
-  disabled?: boolean;
-  children: ReactNode;
+export type PendingAttachment = {
+  uri: string;
+  name: string;
+  type?: string;
+  size?: number;
+  isImage: boolean;
 };
 
-function HostChatAttachBarInner({ chatId, disabled, children }: Props) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [linkOpen, setLinkOpen] = useState(false);
-  const [linkUrl, setLinkUrl] = useState('');
-  const [linkTitle, setLinkTitle] = useState('');
-  const [sharing, setSharing] = useState(false);
-  const [progress, setProgress] = useState<number | null>(null);
-  const [error, setError] = useState('');
+type BarProps = {
+  disabled?: boolean;
+  onPicked: (file: PendingAttachment) => void;
+  onError: (message: string) => void;
+};
 
-  const uploading = progress != null && progress < 100;
+const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp']);
 
+async function fileSizeOf(uri: string, reported?: number | null) {
+  if (typeof reported === 'number' && reported >= 0) return reported;
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    if (info.exists && typeof info.size === 'number') return info.size;
+  } catch {
+    // The server checks size again.
+  }
+  return undefined;
+}
+
+function HostChatAttachBarInner({ disabled, onPicked, onError }: BarProps) {
   const pickFile = async () => {
-    setMenuOpen(false);
-    if (uploading) return;
+    if (disabled) return;
     try {
       const result = await DocumentPicker.getDocumentAsync({
         type: [...ALLOWED_MIME_TYPES, 'image/*'],
@@ -43,140 +50,88 @@ function HostChatAttachBarInner({ chatId, disabled, children }: Props) {
       });
       if (result.canceled || !result.assets?.[0]) return;
       const asset = result.assets[0];
-      const check = isAllowedResourceFile(asset.name, asset.size);
+      const name = asset.name || 'file';
+      const size = await fileSizeOf(asset.uri, asset.size);
+      const check = isAllowedResourceFile(name, size);
       if (!check.ok) {
-        setError(check.error);
+        onError(check.error);
         return;
       }
-      setError('');
-      setProgress(0);
-      await uploadChatResourceFile(
-        chatId,
-        { uri: asset.uri, name: asset.name || 'file', type: asset.mimeType },
-        (loaded, total) => {
-          if (total) setProgress(Math.min(99, Math.round((loaded / total) * 100)));
-        }
-      );
-      setProgress(100);
-      setTimeout(() => setProgress(null), 500);
+      const ext = fileExtensionOf(name);
+      const mime = asset.mimeType || '';
+      onPicked({
+        uri: asset.uri,
+        name,
+        type: mime || undefined,
+        size,
+        isImage: IMAGE_EXT.has(ext) || mime.startsWith('image/'),
+      });
     } catch (err) {
-      setProgress(null);
-      setError(err instanceof Error ? err.message : 'Upload failed');
-    }
-  };
-
-  const submitLink = async () => {
-    const parsed = parseSafeHttpUrl(linkUrl);
-    if (!parsed.ok) {
-      setError(parsed.error);
-      return;
-    }
-    setSharing(true);
-    setError('');
-    try {
-      await shareChatResourceLink(chatId, parsed.href, linkTitle.trim() || undefined);
-      setLinkOpen(false);
-      setLinkUrl('');
-      setLinkTitle('');
-      showToast({ type: 'success', title: 'Link shared' });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not share that link');
-    } finally {
-      setSharing(false);
+      onError(err instanceof Error ? err.message : 'Could not open that file.');
     }
   };
 
   return (
-    <View>
-      <View style={styles.pill}>
-        <View>
-          <Pressable
-            onPress={() => !disabled && !uploading && setMenuOpen((open) => !open)}
-            disabled={disabled || uploading}
-            hitSlop={6}
-            accessibilityRole="button"
-            accessibilityLabel="Attach"
-            style={[styles.clipBtn, (disabled || uploading) && styles.disabled]}>
-            <Ionicons name="attach-outline" size={20} color="#6D415F" />
-          </Pressable>
-          {menuOpen ? (
-            <View style={styles.menu}>
-              <Pressable style={styles.menuItem} onPress={pickFile}>
-                <Ionicons name="cloud-upload-outline" size={16} color={COLORS.primary} />
-                <Text style={styles.menuLabel}>Upload file</Text>
-              </Pressable>
-              <Pressable
-                style={styles.menuItem}
-                onPress={() => {
-                  setMenuOpen(false);
-                  setLinkOpen(true);
-                }}>
-                <Ionicons name="link-outline" size={16} color={COLORS.primary} />
-                <Text style={styles.menuLabel}>Share link</Text>
-              </Pressable>
-            </View>
-          ) : null}
-        </View>
-        {children}
-      </View>
-      {progress != null ? (
-        <View style={styles.progressTrack}>
-          <View style={[styles.progressFill, { width: `${progress}%` }]} />
-        </View>
-      ) : null}
-      {error ? <Text style={styles.error}>{error}</Text> : null}
-
-      <Modal visible={linkOpen} transparent animationType="fade" onRequestClose={() => setLinkOpen(false)}>
-        <Pressable style={styles.overlay} onPress={() => setLinkOpen(false)}>
-          <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
-            <Text style={styles.sheetTitle}>Share a link</Text>
-            <TextInput
-              value={linkUrl}
-              onChangeText={setLinkUrl}
-              placeholder="https://"
-              placeholderTextColor={COLORS.inkSecondary}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-              style={styles.input}
-            />
-            <TextInput
-              value={linkTitle}
-              onChangeText={setLinkTitle}
-              placeholder="Title (optional)"
-              placeholderTextColor={COLORS.inkSecondary}
-              style={styles.input}
-            />
-            <View style={styles.sheetRow}>
-              <Pressable style={styles.cancel} onPress={() => setLinkOpen(false)}>
-                <Text style={styles.cancelText}>Cancel</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.share, (!linkUrl.trim() || sharing) && styles.disabled]}
-                disabled={!linkUrl.trim() || sharing}
-                onPress={submitLink}>
-                <Text style={styles.shareText}>{sharing ? 'Sharing…' : 'Share'}</Text>
-              </Pressable>
-            </View>
-          </Pressable>
-        </Pressable>
-      </Modal>
-    </View>
+    <Pressable
+      onPress={pickFile}
+      disabled={disabled}
+      hitSlop={6}
+      accessibilityRole="button"
+      accessibilityLabel="Attach"
+      style={[styles.clipBtn, disabled && styles.disabled]}>
+      <Ionicons name="attach-outline" size={20} color="#6D415F" />
+    </Pressable>
   );
 }
 
 export const HostChatAttachBar = memo(HostChatAttachBarInner);
 
+function PendingAttachmentPreviewInner({
+  file,
+  progress,
+  busy,
+  onRemove,
+}: {
+  file: PendingAttachment;
+  progress: number | null;
+  busy: boolean;
+  onRemove: () => void;
+}) {
+  return (
+    <View style={styles.preview}>
+      {file.isImage ? (
+        <Image source={{ uri: file.uri }} style={styles.thumb} />
+      ) : (
+        <View style={styles.fileIcon}>
+          <Ionicons name="document-text-outline" size={22} color={COLORS.primary} />
+        </View>
+      )}
+      <View style={styles.previewCopy}>
+        <Text style={styles.previewName} numberOfLines={1}>
+          {file.name}
+        </Text>
+        <Text style={styles.previewSize}>{formatFileSize(file.size)}</Text>
+        {progress != null ? (
+          <View style={styles.progressTrack}>
+            <View style={[styles.progressFill, { width: `${progress}%` }]} />
+          </View>
+        ) : null}
+      </View>
+      <Pressable
+        onPress={onRemove}
+        disabled={busy}
+        accessibilityRole="button"
+        accessibilityLabel="Remove attachment"
+        style={[styles.removeBtn, busy && styles.disabled]}>
+        <Ionicons name="close" size={18} color="#6D415F" />
+      </Pressable>
+    </View>
+  );
+}
+
+export const PendingAttachmentPreview = memo(PendingAttachmentPreviewInner);
+
 const styles = StyleSheet.create({
-  pill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    minHeight: 44,
-    borderRadius: 22,
-    backgroundColor: COLORS.cream,
-    paddingLeft: 4,
-    paddingRight: 4,
-  },
   clipBtn: {
     width: 36,
     height: 36,
@@ -184,75 +139,46 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   disabled: { opacity: 0.45 },
-  menu: {
-    position: 'absolute',
-    bottom: 44,
-    left: 0,
-    width: 168,
-    backgroundColor: COLORS.white,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(109,65,95,0.15)',
-    overflow: 'hidden',
-    zIndex: 20,
-    elevation: 4,
-  },
-  menuItem: {
-    minHeight: 44,
+  preview: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 12,
+    marginBottom: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(109,65,95,0.15)',
+    backgroundColor: COLORS.white,
+    padding: 8,
   },
-  menuLabel: { fontSize: 14, color: COLORS.text },
+  thumb: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    backgroundColor: '#F3EEF8',
+  },
+  fileIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    backgroundColor: 'rgba(109,65,95,0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  previewCopy: { flex: 1, minWidth: 0 },
+  previewName: { fontSize: 14, color: COLORS.text },
+  previewSize: { fontSize: 11, color: '#6B7280', marginTop: 2 },
   progressTrack: {
     height: 4,
     borderRadius: 2,
     backgroundColor: 'rgba(109,65,95,0.15)',
     overflow: 'hidden',
-    marginTop: 8,
+    marginTop: 6,
   },
   progressFill: { height: 4, backgroundColor: COLORS.primary },
-  error: { marginTop: 6, fontSize: 12, color: '#DC2626' },
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    justifyContent: 'center',
-    padding: SPACING[4],
-  },
-  sheet: {
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    padding: SPACING[4],
-    gap: SPACING[2],
-  },
-  sheetTitle: { fontSize: 16, fontWeight: FONT_WEIGHTS.semibold, color: COLORS.text },
-  input: {
-    minHeight: 44,
-    borderWidth: 1,
-    borderColor: 'rgba(109,65,95,0.15)',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    color: COLORS.text,
-  },
-  sheetRow: { flexDirection: 'row', gap: 8, marginTop: 8 },
-  cancel: {
-    flex: 1,
-    minHeight: 44,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(109,65,95,0.2)',
+  removeBtn: {
+    width: 44,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  cancelText: { color: COLORS.primary, fontWeight: FONT_WEIGHTS.medium },
-  share: {
-    flex: 1,
-    minHeight: 44,
-    borderRadius: 10,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  shareText: { color: COLORS.white, fontWeight: FONT_WEIGHTS.medium },
 });

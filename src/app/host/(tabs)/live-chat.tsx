@@ -20,6 +20,11 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ChatMessageBubble } from '@/components/chat/ChatMessageBubble';
+import {
+  HostChatAttachBar,
+  PendingAttachmentPreview,
+  type PendingAttachment,
+} from '@/components/chat/HostChatAttachBar';
 import { showAlert, showToast } from '@/components/feedback';
 import { blockMobileLaunchIfBusy, cleanErrorMessage, showLaunchFailureAlert } from '@/lib/activeActivity';
 import { ANOTHER_ACTIVITY_LIVE_HINT, liveActivityBlocksLaunch } from '@/lib/liveHostActivity';
@@ -51,6 +56,8 @@ import {
   toggleChatNamesVisible,
   type ChatSession,
 } from '@/lib/anonymousChat';
+import { hostLoneLinkUrl } from '@/lib/hostLoneLink';
+import { shareChatResourceLink, uploadChatResourceFile } from '@/lib/liveChatResources';
 import { isClaimedCurrentActivity, isLinkedSessionInactive } from '@/lib/sessionActivityMatch';
 import { TAB_BAR_CONTENT_HEIGHT } from '@/lib/tabBarSafeArea';
 import { toParticipantCount } from '@/lib/toParticipantCount';
@@ -141,7 +148,13 @@ export default function HostLiveChatScreen() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [busyDelete, setBusyDelete] = useState(false);
   const [messageDraft, setMessageDraft] = useState('');
-  const [isSending, setIsSending] = useState(false);
+  const [pendingFile, setPendingFile] = useState<PendingAttachment | null>(null);
+  const [attachmentSending, setAttachmentSending] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [uploadError, setUploadError] = useState('');
+  const sendChainRef = useRef(Promise.resolve());
+  const inflightSendRef = useRef('');
+  const uploadLockRef = useRef(false);
   const [togglingMod, setTogglingMod] = useState(false);
   const [togglingNames, setTogglingNames] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
@@ -408,32 +421,89 @@ export default function HostLiveChatScreen() {
     }
   };
 
-  const onSend = async () => {
+  useEffect(() => {
+    setPendingFile(null);
+    setUploadError('');
+    setUploadProgress(null);
+    setAttachmentSending(false);
+    uploadLockRef.current = false;
+  }, [selectedChatId]);
+
+  const onSend = () => {
     const trimmed = messageDraft.trim();
-    if (!trimmed || !selectedChatId || isSending || !chatIsActive) return;
-    setIsSending(true);
-    try {
-      const response = await addChatMessage(selectedChatId, { message: trimmed }, true);
-      if (!response.success) {
-        showAlert({
-          type: 'error',
-          title: 'Send failed',
-          message: cleanErrorMessage(response.error, 'Failed to send message'),
-          primary: { label: 'Close' },
-        });
-        return;
-      }
-      setMessageDraft('');
-    } catch (error) {
-      showAlert({
-        type: 'error',
-        title: 'Send failed',
-        message: cleanErrorMessage(error, 'Try again'),
-        primary: { label: 'Close' },
-      });
-    } finally {
-      setIsSending(false);
+    const file = pendingFile;
+    const chatId = selectedChatId;
+    if ((!trimmed && !file) || !chatId || !chatIsActive) return;
+    if (uploadLockRef.current) return;
+    const signature = `${trimmed}\n${file ? `${file.name}:${file.size ?? ''}:${file.uri}` : ''}`;
+    if (inflightSendRef.current === signature) return;
+
+    inflightSendRef.current = signature;
+    if (file) {
+      uploadLockRef.current = true;
+      setAttachmentSending(true);
     }
+    if (trimmed) setMessageDraft('');
+
+    sendChainRef.current = sendChainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        let fileSent = false;
+        try {
+          if (file) {
+            setUploadError('');
+            setUploadProgress(0);
+            const uploaded = await uploadChatResourceFile(
+              chatId,
+              { uri: file.uri, name: file.name, type: file.type },
+              (loaded, total) => {
+                if (!total) return;
+                setUploadProgress(Math.min(99, Math.round((loaded / total) * 100)));
+              }
+            );
+            if (uploaded && uploaded.success === false) {
+              throw new Error(uploaded.error || 'Upload failed');
+            }
+            fileSent = true;
+            setPendingFile((current) => (current?.uri === file.uri ? null : current));
+            setUploadProgress(100);
+            setTimeout(() => setUploadProgress(null), 600);
+          }
+          if (trimmed) {
+            const loneLink = hostLoneLinkUrl(trimmed);
+            if (loneLink) {
+              const response = await shareChatResourceLink(chatId, loneLink);
+              if (response && response.success === false) {
+                throw new Error(response.error || 'Failed to send message');
+              }
+            } else {
+              const response = await addChatMessage(chatId, { message: trimmed }, true);
+              if (!response.success) {
+                throw new Error(response.error || 'Failed to send message');
+              }
+            }
+          }
+        } catch (error) {
+          if (trimmed) {
+            setMessageDraft((current) => (String(current || '').trim() ? current : trimmed));
+          }
+          setUploadProgress(null);
+          const message = cleanErrorMessage(error, 'Failed to send message');
+          if (file && !fileSent) setUploadError(message);
+          else {
+            showAlert({
+              type: 'error',
+              title: 'Send failed',
+              message,
+              primary: { label: 'Close' },
+            });
+          }
+        } finally {
+          uploadLockRef.current = false;
+          setAttachmentSending(false);
+          if (inflightSendRef.current === signature) inflightSendRef.current = '';
+        }
+      });
   };
 
   const copyCode = async (code?: string) => {
@@ -454,7 +524,7 @@ export default function HostLiveChatScreen() {
 
   if (selectedChatId && selectedChat) {
     const joinCode = selectedChat.joinCode || '';
-    const canSend = Boolean(messageDraft.trim()) && !isSending;
+    const canSend = (Boolean(messageDraft.trim()) || Boolean(pendingFile)) && !attachmentSending;
 
     return (
       <KeyboardSafeScreen scroll={false} style={styles.screen}>
@@ -594,7 +664,26 @@ export default function HostLiveChatScreen() {
 
           {chatIsActive ? (
             <KeyboardBottomAnchor style={styles.inputBar}>
+              {pendingFile ? (
+                <PendingAttachmentPreview
+                  file={pendingFile}
+                  progress={uploadProgress}
+                  busy={attachmentSending}
+                  onRemove={() => {
+                    if (attachmentSending) return;
+                    setPendingFile(null);
+                  }}
+                />
+              ) : null}
               <View style={styles.inputPill}>
+                <HostChatAttachBar
+                  disabled={attachmentSending}
+                  onError={setUploadError}
+                  onPicked={(file) => {
+                    setUploadError('');
+                    setPendingFile(file);
+                  }}
+                />
                 <TextInput
                   value={messageDraft}
                   onChangeText={setMessageDraft}
@@ -613,6 +702,7 @@ export default function HostLiveChatScreen() {
                   <Ionicons name="send" size={16} color={COLORS.white} />
                 </Pressable>
               </View>
+              {uploadError ? <Text style={styles.uploadError}>{uploadError}</Text> : null}
             </KeyboardBottomAnchor>
           ) : null}
         </View>
@@ -1581,8 +1671,13 @@ const styles = StyleSheet.create({
     height: 44,
     borderRadius: 22,
     backgroundColor: COLORS.cream,
-    paddingLeft: 14,
+    paddingLeft: 4,
     paddingRight: 4,
+  },
+  uploadError: {
+    marginTop: 6,
+    fontSize: 12,
+    color: '#DC2626',
   },
   input: {
     flex: 1,

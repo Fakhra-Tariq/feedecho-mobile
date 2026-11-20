@@ -253,6 +253,15 @@ export default function AudienceQuizHistoryScreen() {
         ]}
         ListHeaderComponent={
           <View>
+            <View style={styles.banner}>
+              <View style={styles.bannerCopy}>
+                <Text style={styles.bannerTitle}>Quiz History</Text>
+                <Text style={styles.bannerHint}>
+                  Review your quiz attempts, scores and results.
+                </Text>
+              </View>
+              <Ionicons name="trophy-outline" size={32} color="rgba(255,255,255,0.8)" />
+            </View>
             <View style={styles.statsGrid}>
               <StatCard icon="ribbon-outline" label="Total Quizzes" value={String(stats.totalQuizzes)} />
               <StatCard
@@ -433,6 +442,18 @@ const styles = StyleSheet.create({
   },
   loadingText: { color: COLORS.darkTextSecondary, fontSize: 14 },
   list: { paddingHorizontal: SPACING[4], paddingTop: SPACING[4] },
+  banner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: COLORS.primary,
+    borderRadius: 12,
+    padding: 24,
+    marginBottom: 16,
+  },
+  bannerCopy: { flex: 1, minWidth: 0 },
+  bannerTitle: { color: COLORS.white, fontSize: 28, fontWeight: FONT_WEIGHTS.bold, marginBottom: 8 },
+  bannerHint: { color: 'rgba(255,255,255,0.9)', fontSize: 15, lineHeight: 22 },
   statsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',

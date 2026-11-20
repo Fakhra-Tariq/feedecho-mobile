@@ -1039,8 +1039,8 @@ export default function AudienceSpaceRaceQuizScreen() {
       if (isJoinWindowExpiredError(err) || data?.expired) {
         setQuizTimeExpired(true);
         Keyboard.dismiss();
-        return;
-      }
+      return;
+    }
       const errMsg = String(data?.error || (err as Error)?.message || '');
       if (errMsg.toLowerCase().includes('already submitted')) {
         try {
@@ -1129,8 +1129,8 @@ export default function AudienceSpaceRaceQuizScreen() {
     return (
       <View style={styles.screen}>
         {chrome()}
-        <View style={styles.centered}>
-          <ActivityIndicator color={COLORS.primary} />
+      <View style={styles.centered}>
+        <ActivityIndicator color={COLORS.primary} />
           <Text style={styles.hint}>Loading quiz...</Text>
         </View>
       </View>
@@ -1294,16 +1294,16 @@ export default function AudienceSpaceRaceQuizScreen() {
               style={[styles.progressMeta, compactProgressRow && styles.progressMetaCompact]}
               numberOfLines={1}>
               Question {index + 1} of {questions.length}
-            </Text>
+        </Text>
             <Text
               style={[styles.progressPct, compactProgressRow && styles.progressPctCompact]}
               numberOfLines={1}>
               {Math.round(progressPct)}% Complete
-            </Text>
+          </Text>
           </View>
           <View style={styles.progressTrack}>
             <View style={[styles.progressFill, { width: `${progressPct}%` }]} />
-          </View>
+      </View>
 
           <View style={styles.promptRow}>
             <View style={styles.numBadge}>
@@ -1334,23 +1334,23 @@ export default function AudienceSpaceRaceQuizScreen() {
           ) : null}
 
           {isWritten ? (
-            <TextInput
-              value={String(answer ?? '')}
-              onChangeText={onSelect}
+          <TextInput
+            value={String(answer ?? '')}
+            onChangeText={onSelect}
               editable={!submitted && !timerBlocksSubmit}
               placeholder="Enter your answer..."
-              placeholderTextColor={COLORS.darkTextSecondary}
-              style={styles.input}
+            placeholderTextColor={COLORS.darkTextSecondary}
+            style={styles.input}
               multiline
-            />
-          ) : (
+          />
+        ) : (
             options.map((option: string, optionIndex: number) => {
               const rawOption = Array.isArray(question.options)
                 ? question.options[optionIndex]
                 : option;
               const selected = optionMatchesSelection(rawOption ?? option, displaySelectedOption);
-              return (
-                <TouchableOpacity
+            return (
+              <TouchableOpacity
                   key={`${optionIndex}-${String(option)}-${selected ? 'selected' : 'idle'}`}
                   style={[
                     styles.option,
@@ -1358,26 +1358,26 @@ export default function AudienceSpaceRaceQuizScreen() {
                     submitted && styles.optionLocked,
                   ]}
                   disabled={submitted}
-                  onPress={() => onSelect(option)}>
+                onPress={() => onSelect(option)}>
                   <View style={[styles.radioOuter, selected && styles.radioOuterOn]}>
                     {selected ? <View style={styles.radioInner} /> : null}
                   </View>
                   <Text style={[styles.optionLabel, selected && styles.optionLabelOn]}>
                     {option}
                   </Text>
-                </TouchableOpacity>
-              );
-            })
-          )}
+              </TouchableOpacity>
+            );
+          })
+        )}
 
           {!submitted ? (
-            <TouchableOpacity
+        <TouchableOpacity
               style={[
                 styles.primary,
                 styles.fullWidth,
                 (busy || !hasAnswer || timerBlocksSubmit) && styles.disabled,
               ]}
-              onPress={onSubmit}
+          onPress={onSubmit}
               disabled={busy || !hasAnswer || timerBlocksSubmit}>
               {busy ? (
                 <View style={styles.submitBusy}>
@@ -1387,7 +1387,7 @@ export default function AudienceSpaceRaceQuizScreen() {
               ) : (
                 <Text style={styles.primaryLabel}>🚀 Submit Answer for Team</Text>
               )}
-            </TouchableOpacity>
+        </TouchableOpacity>
           ) : null}
 
           <QuizQuestionNavButtons
@@ -1404,7 +1404,7 @@ export default function AudienceSpaceRaceQuizScreen() {
             }
             showTrailingArrow={index !== questions.length - 1}
           />
-        </View>
+            </View>
       </ScrollView>
       {fab}
     </KeyboardSafeScreen>

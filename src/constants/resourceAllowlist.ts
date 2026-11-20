@@ -2,7 +2,8 @@
  * Keep in sync with Web/client/src/constants/resourceAllowlist.js
  * and Web/server/utils/resourceAllowlist.js
  */
-export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_FILE_BYTES = 5 * 1024 * 1024;
+export const MAX_FILE_LABEL = '5 MB';
 export const ALLOWED_EXTENSIONS = [
   'pdf',
   'doc',
@@ -57,7 +58,7 @@ export function isAllowedResourceFile(fileName?: string, size?: number | null) {
     };
   }
   if (typeof size === 'number' && size > MAX_FILE_BYTES) {
-    return { ok: false as const, error: 'File is too large. Maximum size is 10 MB.' };
+    return { ok: false as const, error: `File is too large. Maximum size is ${MAX_FILE_LABEL}.` };
   }
   return { ok: true as const, ext };
 }

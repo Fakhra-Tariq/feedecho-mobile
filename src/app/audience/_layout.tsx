@@ -117,10 +117,10 @@ export default function AudienceLayout() {
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen name="join" options={{ title: 'Join a Session', ...activityHeader }} />
       <Stack.Screen name="quiz" options={{ title: 'Quiz', ...activityHeader }} />
-      <Stack.Screen name="quiz-history" options={{ title: 'My Quizzes', ...activityHeader }} />
+      <Stack.Screen name="quiz-history" options={{ title: 'Quiz History', ...activityHeader }} />
       <Stack.Screen
         name="space-race-history"
-        options={{ title: 'Space Race History', ...activityHeader }}
+        options={{ title: 'Resources', ...activityHeader }}
       />
       <Stack.Screen
         name="live-chat"
