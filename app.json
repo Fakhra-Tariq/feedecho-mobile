@@ -17,7 +17,7 @@
     },
     "android": {
       "package": "com.feedecho",
-      "versionCode": 3,
+      "versionCode": 4,
       "adaptiveIcon": {
         "backgroundColor": "#F4F1EC",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
